@@ -2,7 +2,7 @@
 ## Title: GarchaDex
 ## Notes: Pokedex de enemigos: hechizos que castean y drops con porcentajes. /gdx
 ## Author: Ivan
-## Version: 0.4.0
+## Version: 0.9.0
 ## SavedVariables: GarchaDexDB
 ## Category: Development
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
@@ -14,6 +14,7 @@ data\gdx_seed.lua
 Locale.lua
 Core.lua
 Skin.lua
+Discover.lua
 Capture.lua
 Display.lua
 UI.lua

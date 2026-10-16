@@ -312,6 +312,13 @@ local function sampleCast(event, unit, argSpellID, argIsSecret)
 				parts[#parts + 1] = label .. "=ok:" .. S(v)
 			end
 		end
+		local function probeFn(label, fn, ...)
+			if type(fn) ~= "function" then
+				parts[#parts + 1] = label .. "=AUSENTE"
+				return
+			end
+			probe(label, function() return fn(...) end)
+		end
 		probe("tostring", function() return tostring(argSpellID) end)
 		probe("concat", function() return "" .. argSpellID end)
 		probe("format_s", function() return string.format("%s", argSpellID) end)
@@ -336,6 +343,31 @@ local function sampleCast(event, unit, argSpellID, argIsSecret)
 		probe("GetSpellName", function() return C_Spell and C_Spell.GetSpellName(argSpellID) end)
 		probe("C_Spell.GetSpellLink", function() return C_Spell and C_Spell.GetSpellLink and C_Spell.GetSpellLink(argSpellID) end)
 		probe("C_Spell.GetSpellTexture", function() return C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(argSpellID) end)
+		-- The link carries the spell id ("spell:5262"). If its bytes can be read one at a time,
+		-- the id can be rebuilt as PLAIN text and the dex can dedupe exactly.
+		local secretLink
+		if C_Spell and C_Spell.GetSpellLink then
+			local ok, l = pcall(C_Spell.GetSpellLink, argSpellID)
+			if ok and isSecret(l) then secretLink = l end
+		end
+		if secretLink then
+			probe("link_len", function() return #secretLink end)
+			probe("link_byte1", function() return string.byte(secretLink, 1) end)
+			probe("link_sub", function() return string.sub(secretLink, 1, 6) end)
+			probe("link_sub_mid", function() return string.sub(secretLink, 11, 20) end)
+			probe("link_find_colon", function() return string.find(secretLink, ":") end)
+			probe("link_gsub_digits", function() return string.gsub(secretLink, "%D", "") end)
+		else
+			parts[#parts + 1] = "sin link secreto para fingerprintar"
+		end
+		-- other per-spell values: any plain one can serve as a fingerprint for dedupe
+		probeFn("IsSpellPassive", C_Spell and C_Spell.IsSpellPassive, argSpellID)
+		probeFn("IsSpellDataCached", C_Spell and C_Spell.IsSpellDataCached, argSpellID)
+		probeFn("GetSpellCastCount", C_Spell and C_Spell.GetSpellCastCount, argSpellID)
+		probeFn("GetSpellCooldownDuration", C_Spell and C_Spell.GetSpellCooldownDuration, argSpellID)
+		probeFn("GetSpellDisplayCount", C_Spell and C_Spell.GetSpellDisplayCount, argSpellID)
+		probeFn("SpellHasRange", C_Spell and C_Spell.SpellHasRange, argSpellID, "target")
+		probeFn("GetSpellCharges", C_Spell and C_Spell.GetSpellCharges, argSpellID)
 		-- side channel check: if the client's own encoder turns a secret into a plain
 		-- string, we could key and dedupe spells after all
 		if cap("C_EncodingUtil.SerializeJSON") then

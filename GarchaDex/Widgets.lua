@@ -8,10 +8,8 @@ local UI = ns.UI
 local S = ns.Skin
 local C = S.C
 
-local bar, indexFrame, indexRows, indexOffset, indexFilter, indexList, textFrame
-
+local bar, textFrame
 local ROW_H = 20
-local INDEX_ROWS = 15
 
 local function say(msg) print("|cff33ff99GarchaDex|r " .. ns.T(msg)) end
 
@@ -48,240 +46,193 @@ function UI.ShowText(title, text)
 	textFrame.title:SetText(title or "GarchaDex")
 	textFrame.edit:SetText(text or "")
 	textFrame.edit:ClearFocus()
+	-- the window grows with the text (lines x line height), clamped to the screen
+	local lines = 1
+	for _ in string.gmatch(text or "", "\n") do
+		lines = lines + 1
+	end
+	local lh = 14
+	local okLh, v = pcall(function() return textFrame.edit:GetLineHeight() end)
+	if okLh and type(v) == "number" and v > 0 then lh = v end
+	local maxH = math.max(200, (UIParent:GetHeight() or 768) - 140)
+	local editH = math.min(lines * lh + 8, maxH - 70)
+	textFrame.edit:SetHeight(editH)
+	textFrame:SetHeight(editH + 70)
 	textFrame:Show()
 	return textFrame
 end
 
--- ------------------------------------------------------------------ index (every npc found, classic pokedex style)
 
-local function seedImportantList()
-	local out = {}
-	local seen = ns.DB().seen
-	for id, rec in pairs(ns.npc or {}) do
-		if not seen[id] then
-			local name = string.match(rec, "^[^|]+") or ("npc " .. id)
-			out[#out + 1] = { id = id, name = name, visited = false }
+-- ------------------------------------------------------------------ art audit
+
+-- Atlas names are checked with the client's own C_Texture.GetAtlasExists, and texture paths are
+-- drawn in a grid: a missing path shows the client's green checkerboard, so one look settles it.
+local ART_ATLASES = {
+	"UI-Frame-Portrait-Border", "UI-Frame-IconBackground", "UI-DialogBox-Border", "UI-DialogBox-Background",
+	"UI-Panel-Button-Up", "UI-Panel-Button-Down", "UI-Panel-Button-Highlight", "UI-Panel-Button-Disabled",
+	"options-icon", "common-icon-redx", "bags-icon-slot", "UI-Tooltip-Border",
+	"UI-HUD-ActionBar-IconFrame", "talents-frame-border", "UI-HUD-MicroMenu-Bags-Up", "ui-frame-generic-dark",
+}
+local ART_PATHS = {
+	"Interface\\Tooltips\\UI-Tooltip-Border",
+	"Interface\\Tooltips\\UI-Tooltip-Background",
+	"Interface\\DialogFrame\\UI-DialogBox-Border",
+	"Interface\\DialogFrame\\UI-DialogBox-Background",
+	"Interface\\DialogFrame\\UI-DialogBox-Header",
+	"Interface\\Buttons\\UI-Panel-Button-Up",
+	"Interface\\Buttons\\UI-Panel-Button-Down",
+	"Interface\\Buttons\\UI-Panel-Button-Highlight",
+	"Interface\\Common\\UI-TooltipDivider",
+	"Interface\\Buttons\\UI-Panel-Button-Disabled",
+}
+
+local artPanel
+function UI.ShowArt()
+	local lines = { "atlas del cliente (C_Texture.GetAtlasExists):", "" }
+	for _, a in ipairs(ART_ATLASES) do
+		lines[#lines + 1] = ("  %-42s %s"):format(a, S.atlasExists(a) and "|cff40ff40SI|r" or "|cffff6060no|r")
+	end
+	lines[#lines + 1] = ""
+	lines[#lines + 1] = "templates de Blizzard (pcall CreateFrame):"
+	for _, tpl in ipairs({ "UIPanelButtonTemplate", "UIPanelCloseButton", "BackdropTemplate",
+		"UIPanelScrollFrameTemplate", "UICheckButtonTemplate", "InputBoxTemplate", "GameTooltipTemplate" }) do
+		local ok = pcall(CreateFrame, "Frame", nil, UIParent, tpl)
+		lines[#lines + 1] = ("  %-42s %s"):format(tpl, ok and "|cff40ff40SI|r" or "|cffff6060no|r")
+	end
+	for _, ty in ipairs({ "PlayerModel", "Model", "Cooldown", "StatusBar", "EditBox", "ScrollFrame" }) do
+		local ok = pcall(CreateFrame, ty, nil, UIParent)
+		lines[#lines + 1] = ("  tipo %-37s %s"):format(ty, ok and "|cff40ff40SI|r" or "|cffff6060no|r")
+	end
+	-- the 3d model is what the card uses for a creature you are not targeting: test both calls
+	local okFrame, mframe = pcall(CreateFrame, "PlayerModel", nil, UIParent)
+	local okOld, oframe = false, nil
+	if not okFrame then okOld, oframe = pcall(CreateFrame, "Model", nil, UIParent) end
+	local model = okFrame and mframe or oframe
+	local callA, callB = "-", "-"
+	if model then
+		local okA, errA = pcall(function() model:SetModelByCreatureDisplayID(4192) end)
+		callA = okA and "|cff40ff40ok|r" or ("|cffff6060ERR: " .. tostring(errA):sub(1, 60) .. "|r")
+		local okB, errB = pcall(function() model:SetDisplayInfo(4192) end)
+		callB = okB and "|cff40ff40ok|r" or ("|cffff6060ERR: " .. tostring(errB):sub(1, 60) .. "|r")
+	end
+	lines[#lines + 1] = ("  tipo %-37s %s"):format("PlayerModel (el de la ficha)",
+		model and "|cff40ff40SI|r" or "|cffff6060no|r")
+	lines[#lines + 1] = ("  %-41s %s"):format("SetModelByCreatureDisplayID(4192)", callA)
+	lines[#lines + 1] = ("  %-41s %s"):format("SetDisplayInfo(4192)", callB)
+	lines[#lines + 1] = ""
+	lines[#lines + 1] = "abajo: texturas por ruta. Si ves un damero verde/negro, esa ruta no existe aca."
+	lines[#lines + 1] = "pegame esta lista y los cuadros que se vean bien y uso ese arte de verdad."
+	UI.ShowText("GarchaDex · auditoria de arte", table.concat(lines, "\n"))
+
+	if not artPanel then
+		local gridRows = math.ceil(#ART_PATHS / 5)
+		artPanel = S.Panel("GarchaDexArt", UIParent, 820, 52 + gridRows * 142, "GarchaDex · arte candidato")
+		artPanel:SetPoint("CENTER", UIParent, "CENTER", 0, -60)
+		-- a live 3d model next to the texture grid: if this one renders, the card's will too
+		local okM, model = pcall(CreateFrame, "PlayerModel", nil, artPanel)
+		if not okM then okM, model = pcall(CreateFrame, "Model", nil, artPanel) end
+		if okM and model then
+			model:SetSize(120, 150)
+			model:SetPoint("BOTTOMRIGHT", -24, 30)
+			pcall(function()
+				model:SetModelByCreatureDisplayID(4192)
+				model:SetPortraitZoom(1)
+				model:SetCamDistanceScale(0.85)
+				model:SetRotation(0.5)
+			end)
+			local l = model:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+			l:SetPoint("TOP", model, "BOTTOM", 0, -2)
+			l:SetText("modelo 4192 (Fanatic)")
+		end
+		for idx, path in ipairs(ART_PATHS) do
+			local col = (idx - 1) % 5
+			local row = math.floor((idx - 1) / 5)
+			local box = CreateFrame("Frame", nil, artPanel)
+			box:SetSize(110, 110)
+			box:SetPoint("TOPLEFT", 20 + col * 122, -44 - row * 140)
+			S.Border(box, C.border)
+			local t = box:CreateTexture(nil, "ARTWORK")
+			t:SetAllPoints(box)
+			t:SetTexture(path)
+			local l = box:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+			l:SetPoint("TOP", box, "BOTTOM", 0, -4)
+			l:SetWidth(120)
+			l:SetText(path:match("[^\\]+$") or path)
 		end
 	end
-	return out
+	artPanel:Show()
 end
 
-local function newIndexRow(i)
-	local r = CreateFrame("Button", nil, indexFrame.body)
-	r:SetHeight(ROW_H)
-	r:SetPoint("TOPLEFT", indexFrame.body, "TOPLEFT", 4, -(i - 1) * ROW_H)
-	r:SetPoint("RIGHT", indexFrame.body, "RIGHT", -4, 0)
-	local bg = S.tex(r, C.row[1], C.row[2], C.row[3], 0.35, "BACKGROUND")
-	bg:SetAllPoints(r)
-	local hl = S.tex(r, C.accent[1], C.accent[2], C.accent[3], 0.18, "HIGHLIGHT")
-	hl:SetAllPoints(r)
-	local text = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	text:SetPoint("LEFT", 6, 0)
-	text:SetJustifyH("LEFT")
-	r.text = text
-	r:SetScript("OnClick", function(self)
-		if self.entry then UI.Show(self.entry.id) end
-	end)
-	r:SetScript("OnEnter", function(self)
-		if self.entry and self.entry.e then
-			local e = self.entry.e
-			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-			GameTooltip:AddLine(self.entry.name, C.gold[1], C.gold[2], C.gold[3])
-			GameTooltip:AddLine(("id %s · lvl %s · %s"):format(self.entry.id, tostring(e.level or "?"),
-				tostring(e.creatureType or "?")), 0.8, 0.8, 0.8)
-			GameTooltip:AddLine(("%s %d · kills %d · %s %d · %s"):format(
-				ns.T("visto"), e.seen or 0, e.kills or 0, ns.T("looteado"), e.lootWindows or 0,
-				copper(e.moneyCopper)), C.green[1], C.green[2], C.green[3])
-			GameTooltip:AddLine(ns.T("click para abrir la ficha"), 0.6, 0.75, 1)
-			GameTooltip:Show()
-		end
-	end)
-	r:SetScript("OnLeave", function() GameTooltip:Hide() end)
-	return r
-end
+-- ------------------------------------------------------------------ the widget (the only thing on screen)
 
-local function rebuildIndex()
-	local seen = ns.DB().seen
-	local filter = string.lower((indexFilter and indexFilter:GetText()) or "")
-	local list = {}
-	for id, e in pairs(seen) do
-		local name = e.name or (ns.npc and ns.npc[id] and string.match(ns.npc[id], "^[^|]+")) or ("npc " .. id)
-		list[#list + 1] = { id = id, name = name, visited = true, e = e }
-	end
-	for _, r in ipairs(seedImportantList()) do list[#list + 1] = r end
-	table.sort(list, function(a, b)
-		if a.visited ~= b.visited then return a.visited end
-		if a.visited and (a.e.seen or 0) ~= (b.e.seen or 0) then return (a.e.seen or 0) > (b.e.seen or 0) end
-		return (a.name or "") < (b.name or "")
-	end)
-	if filter ~= "" then
-		local f = {}
-		for _, r in ipairs(list) do
-			if string.find(string.lower(r.name), filter, 1, true) or string.find(tostring(r.id), filter, 1, true) then
-				f[#f + 1] = r
-			end
-		end
-		list = f
-	end
-	indexList = list
-	local visited = 0
-	for _, r in ipairs(list) do
-		if r.visited then visited = visited + 1 end
-	end
-	if indexOffset > #list then indexOffset = math.max(0, #list - INDEX_ROWS) end
-	for i = 1, INDEX_ROWS do
-		local row, item = indexRows[i], list[indexOffset + i]
-		if item then
-			row:Show()
-			row.entry = item
-			local e = item.e
-			if item.visited then
-				local deaths = (e.deaths or 0) > 0 and ("   |cffff5c55" .. e.deaths .. "|r") or ""
-				row.text:SetText(("|cffffd200%s|r  |cff707070id %s · lvl %s|r    %s %d · kills %d · %s %d%s"):format(
-					item.name:sub(1, 26), item.id, tostring(e.level or "?"),
-					ns.T("visto"), e.seen or 0, e.kills or 0, ns.T("looteado"), e.lootWindows or 0, deaths))
-			else
-				local meta = ns.SeedNpc(item.id)
-				local lvl = (meta and string.match(meta, "^[^|]*|([^|]*)")) or "?"
-				row.text:SetText(("|cff5a5a5a%s  id %s · lvl %s · %s|r"):format(
-					item.name:sub(1, 26), item.id, tostring(lvl), ns.T("sin visitar")))
-			end
-		else
-			row:Hide()
-			row.entry = nil
-		end
-	end
-	indexFrame.title:SetText(("|cff3fd15aGarchaDex|r  |cff808080%s|r · %d (%d %s)"):format(
-		ns.T("Indice"), #list, visited, ns.T("con datos")))
-end
-UI.RebuildIndex = rebuildIndex
+-- One small book on screen. Everything else moved to slash commands: a toolbar of eight buttons
+-- was clutter he asked to delete. Click opens the dex, right click hides it, /gdx widget brings it
+-- back, and it remembers where it was left.
+local widget
 
-function UI.ShowIndex()
-	if not indexFrame then
-		indexFrame = S.Panel("GarchaDexIndex", UIParent, 640, 440, "GarchaDex")
-		indexFrame:SetPoint("CENTER")
-		indexFilter = CreateFrame("EditBox", nil, indexFrame)
-		indexFilter:SetSize(180, 20)
-		indexFilter:SetPoint("TOPLEFT", 16, -40)
-		indexFilter:SetAutoFocus(false)
-		indexFilter:SetFontObject("ChatFontNormal")
-		indexFilter:SetScript("OnTextChanged", function()
-			indexOffset = 0
-			rebuildIndex()
-		end)
-		indexFilter:SetScript("OnEscapePressed", function(f)
-			f:ClearFocus()
-			indexFrame:Hide()
-		end)
-		local hint = indexFrame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-		hint:SetPoint("LEFT", indexFilter, "RIGHT", 8, 0)
-		hint:SetText(ns.T("filtro por nombre o id · rueda del mouse para scrollear"))
-
-		local body = CreateFrame("Frame", nil, indexFrame)
-		body:SetPoint("TOPLEFT", 12, -68)
-		body:SetPoint("BOTTOMRIGHT", -12, 14)
-		body:EnableMouseWheel(true)
-		indexFrame.body = body
-		body:SetScript("OnMouseWheel", function(_, delta)
-			if not indexList then return end
-			indexOffset = math.max(0, math.min(math.max(0, #indexList - INDEX_ROWS), indexOffset - delta))
-			rebuildIndex()
-		end)
-		indexRows = {}
-		for i = 1, INDEX_ROWS do indexRows[i] = newIndexRow(i) end
-		indexFrame:SetScript("OnShow", function() rebuildIndex() end)
-	end
-	indexOffset = indexOffset or 0
-	indexFrame:Show()
-	rebuildIndex()
-end
-
--- ------------------------------------------------------------------ floating toolbar
-
-local function saveBarPos()
-	local p, _, rp, x, y = bar:GetPoint(1)
-	ns.DB().meta.barPos = { p = p, rp = rp, x = x, y = y }
-end
-
-local function restoreBarPos()
-	local pos = ns.DB().meta.barPos
-	if pos and pos.p then
-		bar:ClearAllPoints()
-		bar:SetPoint(pos.p, UIParent, pos.rp or pos.p, pos.x or 0, pos.y or 0)
-	end
-end
-
-local function addBarButton(label, tip, onClick)
-	local b = S.Button(bar, label, 30, 30, tip, onClick)
-	local n = (bar.buttons or 0)
-	b:SetPoint("LEFT", bar, "LEFT", 4 + n * 33, 0)
-	bar.buttons = n + 1
-	return b
-end
-
-local function relayoutOpenWindows()
-	if UI.frameInstance and UI.frameInstance:IsShown() and UI.currentID then
-		UI.Show(UI.currentID)
-	end
-	if indexFrame and indexFrame:IsShown() then rebuildIndex() end
+local function saveWidgetPos()
+	local p, _, rp, x, y = widget:GetPoint(1)
+	ns.DB().meta.widgetPos = { p = p, rp = rp, x = x, y = y }
 end
 
 function UI.BuildBar()
-	if bar then
-		bar:Show()
-		return bar
+	if widget then
+		widget:Show()
+		return widget
 	end
-	bar = CreateFrame("Frame", "GarchaDexBar", UIParent)
-	bar:SetSize(4 + 8 * 33 + 4, 38)
-	bar:SetPoint("LEFT", UIParent, "LEFT", 40, 120)
-	bar:SetMovable(true)
-	bar:EnableMouse(true)
-	bar:SetClampedToScreen(true)
-	bar:RegisterForDrag("LeftButton")
-	bar:SetScript("OnDragStart", function(f) f:StartMoving() end)
-	bar:SetScript("OnDragStop", function(f)
+	widget = CreateFrame("Button", "GarchaDexWidget", UIParent)
+	widget:SetSize(146, 26)
+	widget:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 24, -24)
+	widget:SetMovable(true)
+	widget:SetClampedToScreen(true)
+	widget:RegisterForDrag("LeftButton")
+	widget:SetScript("OnDragStart", function(f) f:StartMoving() end)
+	widget:SetScript("OnDragStop", function(f)
 		f:StopMovingOrSizing()
-		pcall(saveBarPos)
+		pcall(saveWidgetPos)
 	end)
-	local bg = S.tex(bar, 0, 0, 0, 0.55, "BACKGROUND")
-	bg:SetAllPoints(bar)
-	S.Border(bar, C.border)
-	restoreBarPos()
 
-	addBarButton("Ficha", "ficha del enemigo targeteado", function()
-		if UI.Show then UI.Show() end
+	-- the cover: warm brown, with the trim inset so the corners read rounded, like the book icon
+	local cover = S.tex(widget, 0.13, 0.09, 0.05, 0.97, "BACKGROUND")
+	cover:SetAllPoints(widget)
+	local inner = CreateFrame("Frame", nil, widget)
+	inner:SetPoint("TOPLEFT", 2, -2)
+	inner:SetPoint("BOTTOMRIGHT", -2, 2)
+	pcall(function() inner:SetFrameLevel(widget:GetFrameLevel() + 1) end)
+	S.Border(inner, S.C.trim, 1, "ARTWORK")
+	local hl = S.tex(widget, S.C.accent[1], S.C.accent[2], S.C.accent[3], 0.12, "HIGHLIGHT")
+	hl:SetAllPoints(widget)
+
+	local icon = widget:CreateTexture(nil, "ARTWORK")
+	icon:SetSize(18, 18)
+	icon:SetPoint("LEFT", 7, 0)
+	icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+	pcall(function() icon:SetTexture("Interface\\Icons\\INV_Misc_Book_09") end)
+
+	local label = widget:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	label:SetPoint("LEFT", icon, "RIGHT", 6, 0)
+	label:SetText("|cffffd200GarchaDex|r")
+
+	widget:SetScript("OnClick", function()
+		if ns.UI and ns.UI.Show then ns.UI.Show() end
 	end)
-	addBarButton("Indice", "todos los npcs encontrados, por id", function() UI.ShowIndex() end)
-	addBarButton("Loot", "ultimos looteos vistos (diagnostico)", function()
-		UI.ShowText("GarchaDex · loot", ns.LootText and ns.LootText() or "")
+	widget:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:AddLine("GarchaDex v" .. tostring(ns.VERSION), 1, 0.82, 0, 1)
+		GameTooltip:AddLine(ns.T("click para abrir el bestiario"), 0.85, 0.85, 0.85)
+		GameTooltip:AddLine(ns.T("arrastrable · click derecho lo oculta · /gdx help"), 0.6, 0.6, 0.6)
+		GameTooltip:Show()
 	end)
-	addBarButton("Seed", "estado del seed y chequeo crudo", function()
-		UI.ShowText("GarchaDex · seed", ns.SeedText and ns.SeedText() or "")
+	widget:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	widget:SetScript("OnMouseUp", function(_, button)
+		if button == "RightButton" then widget:Hide() end
 	end)
-	addBarButton("Stats", "contadores generales", function()
-		UI.ShowText("GarchaDex · stats", ns.StatsText and ns.StatsText() or "")
-	end)
-	addBarButton("Test", "render de valores secretos", function()
-		if ns.RunSecretTest then ns.RunSecretTest() end
-	end)
-	addBarButton(ns.LANG == "en" and "ES" or "EN", "cambiar idioma del addon", function(self)
-		local nxt = (ns.LANG == "en") and "es" or "en"
-		ns.SetLang(nxt)
-		ns.DB().meta.lang = nxt
-		self.fs:SetText(nxt == "en" and "ES" or "EN")
-		relayoutOpenWindows()
-		say("idioma: " .. ns.LANG)
-	end)
-	addBarButton("X", "cerrar todas las ventanas de GarchaDex", function()
-		if UI.frameInstance then UI.frameInstance:Hide() end
-		if indexFrame then indexFrame:Hide() end
-		if textFrame then textFrame:Hide() end
-	end)
-	bar:SetScript("OnMouseUp", function(_, button)
-		if button == "RightButton" then bar:Hide() end
-	end)
-	local handle = bar:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	handle:SetPoint("BOTTOM", bar, "BOTTOM", 0, -13)
-	handle:SetText(ns.T("arrastrable · click derecho oculta"))
-	return bar
+
+	local pos = ns.DB().meta.widgetPos
+	if pos and pos.p then
+		widget:ClearAllPoints()
+		widget:SetPoint(pos.p, UIParent, pos.rp or pos.p, pos.x or 0, pos.y or 0)
+	end
+	return widget
 end
+

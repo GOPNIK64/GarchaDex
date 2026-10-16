@@ -50,8 +50,10 @@ end
 local function credit(reason)
 	if not watching or watching.credited then return end
 	watching.credited = true
-	local e = ns.Entry(watching.id)
+	local wid = watching.id
+	local e = ns.Entry(wid)
 	if not e then return end
+	local first = (e.kills or 0) == 0
 	e.kills = (e.kills or 0) + 1
 	e.lastKill = time and time() or nil
 	lastKilled = { id = watching.id, at = (GetTime and GetTime()) or 0 }
@@ -59,6 +61,9 @@ local function credit(reason)
 	local c = ns.DB().chars[ck]
 	if c then c.kills = (c.kills or 0) + 1 end
 	ns.OnCapture("kill", e, reason)
+	if first and ns.Discovery then
+		ns.Discovery.Creature("first_kill", wid, "lo mataste por primera vez")
+	end
 	watching = nil
 end
 ns.CreditWatch = credit
@@ -268,7 +273,12 @@ local function onLootClosed()
 			firstWindow = true
 			e.lootNoGuid = (e.lootNoGuid or 0) + 1
 		end
-		if firstWindow then e.lootWindows = (e.lootWindows or 0) + 1 end
+		if firstWindow then
+			e.lootWindows = (e.lootWindows or 0) + 1
+			if e.lootWindows == 1 and ns.Discovery then
+				ns.Discovery.Creature("first_loot", lootWindow.id, "primer cadaver looteado")
+			end
+		end
 		e.moneyCopper = (e.moneyCopper or 0) + money
 		local added = 0
 		for _, s in ipairs(lootWindow.slots or {}) do
@@ -280,6 +290,23 @@ local function onLootClosed()
 				if not d then
 					d = { name = s.name, count = 0, qty = 0, id = s.id }
 					e.drops[key] = d
+					-- a drop the pool did not show yet: this is the discovery the dex lives for
+					if ns.Discovery then
+						local own, shared = ns.ParseLoot(ns.SeedLoot(lootWindow.id))
+						local iid = tonumber(s.id)
+						local chance = iid and (own[iid] or shared[iid]) or nil
+						local total = ns.SeedN(lootWindow.id)
+						local disc = 0
+						for k in pairs(own) do
+							if e.drops[tostring(k)] then disc = disc + 1 end
+						end
+						ns.Discovery.Drop(lootWindow.id, s.id, s.name, chance, disc, total)
+						-- and when the last unknown item of the pool falls, the entry is complete
+						if total and total > 0 and disc >= total and not e.poolDone then
+							e.poolDone = true
+							ns.Discovery.Creature("pool_done", lootWindow.id, ("pool completa · %d items"):format(total))
+						end
+					end
 				end
 				d.count = d.count + 1
 				d.qty = d.qty + s.qty
@@ -350,10 +377,17 @@ function ns.OnCast(event, unit, spellID, isSecretArg)
 		end
 	end
 	if e then
+		local firstCast = (e.casts or 0) == 0
 		e.casts = (e.casts or 0) + 1
 		e.spellLog = e.spellLog or {}
 		table.insert(e.spellLog, { name = name, icon = icon, how = how, at = time and time() or nil })
 		while #e.spellLog > MAX_SPELL_LOG do table.remove(e.spellLog, 1) end
+		if firstCast and ns.Discovery and watching then
+			local refs = 0
+			for _ in string.gmatch(ns.SeedSpells(watching.id) or "", "%d+") do refs = refs + 1 end
+			ns.Discovery.Creature("first_cast", watching.id,
+				refs > 0 and (refs .. " " .. ns.T("hechizos en la base 1.12")) or "le viste castear")
+		end
 	end
 	lastCast = { name = name, icon = icon, how = how, secret = isSecretArg and true or false, spell = spellID }
 	local ck = ns.CharKey()
@@ -402,12 +436,16 @@ local function creditDeath()
 	if not id then return end
 	local e = ns.Entry(id)
 	if not e then return end
+	local firstDeath = (e.deaths or 0) == 0
 	e.deaths = (e.deaths or 0) + 1
 	e.lastDeath = time and time() or nil
 	local ck = ns.CharKey()
 	local c = ns.DB().chars[ck]
 	if c then c.deaths = (c.deaths or 0) + 1 end
 	ns.OnCapture("death", e, "attributed to the mob you were fighting")
+	if firstDeath and ns.Discovery then
+		ns.Discovery.Creature("first_death", id, "te mato por primera vez")
+	end
 end
 
 function H.PLAYER_DEAD()

@@ -89,16 +89,21 @@ function ns.PrintEntry(id)
 	local meta = seedMeta(id)
 	local title = (e and e.name) or (meta and meta.name) or ("npc " .. id)
 	say(("|cffffd200%s|r  (npc %s)"):format(title, id))
+	-- identity: each layer labelled by its source, never mixed
 	if meta then
-		say(("  referencia 1.12: lvl %s-%s, %s, tipo %s, modelo %s, mapa %s"):format(
-			meta.minLevel, meta.maxLevel, RANK[meta.rank] or meta.rank, meta.ctype, meta.model, meta.map))
-	else
-		local n2, sp = ns.SeedN(id), ns.SeedSpells(id)
-		if n2 or sp then
-			say(("  mob comun: sin ficha en el seed, pero la referencia si tiene la pool (N=%s)%s"):format(
-				n2 and tostring(n2) or "?", sp and " y hechizos declarados" or ""))
-		else
-			say("  sin entrada en el seed (contenido de Forever, o mob que la base 1.12 no tiene)")
+		say(("  |cff808080base 1.12:|r lvl %s-%s · %s · mapa %s"):format(
+			meta.minLevel, meta.maxLevel, RANK[meta.rank] or meta.rank, meta.map))
+	elseif ns.SeedN(id) or ns.SeedSpells(id) then
+		say("  |cff808080no esta en la base 1.12: contenido de Forever|r")
+	end
+	if e then
+		local bits = {}
+		if e.level then bits[#bits + 1] = "lvl " .. tostring(e.level) end
+		-- the client's own words for type and classification: already in the player's language
+		if e.creatureType then bits[#bits + 1] = tostring(e.creatureType) end
+		if e.classification and e.classification ~= "normal" then bits[#bits + 1] = tostring(e.classification) end
+		if #bits > 0 then
+			say("  |cff00ff00" .. ns.T("en el juego") .. ":|r " .. table.concat(bits, " · "))
 		end
 	end
 	if not e then
@@ -110,55 +115,39 @@ function ns.PrintEntry(id)
 		e.zone and (", zona " .. e.zone) or "",
 		e.deaths and e.deaths > 0 and (", te mató " .. e.deaths .. " veces") or "",
 		(e.lootNoGuid or 0) > 0 and (", sin GUID x" .. e.lootNoGuid) or ""))
-	if e.level then say(("  lvl %s, %s, %s"):format(tostring(e.level), tostring(e.creatureType or "?"), tostring(e.classification or "?"))) end
+	if e.level then say(("  %s %s, %s"):format(ns.T("capturado:"), tostring(e.level), tostring(e.creatureType or "?"))) end
 
-	-- drops: measured first, then the reference pool
-	local drops = {}
-	for _, d in pairs(e.drops or {}) do drops[#drops + 1] = d end
-	table.sort(drops, function(a, b) return (a.count or 0) > (b.count or 0) end)
+	-- drops: only what you have looted from this creature, with the static 1.12 chance
 	local ownSeed, sharedSeed = ns.ParseLoot(ns.SeedLoot(id))
 	local n = ns.SeedN(id)
-	local denom = (e.lootWindows or 0) > 0 and e.lootWindows or 1
-	local discovered = 0
-	for key in pairs(ownSeed) do if e.drops[tostring(key)] then discovered = discovered + 1 end end
-	if #drops > 0 then
-		say(("  |cff00ff00DROPS MEDIDOS por vos|r · %d cadaveres looteados · %s/%s items descubiertos:"):format(
-			e.lootWindows or 0, tostring(discovered), n and tostring(n) or "?"))
-		for _, d in ipairs(drops) do
-			local key = tonumber(d.id)
-			local refTxt
-			if key and ownSeed[key] then
-				refTxt = ("ref %.2f%%"):format(ownSeed[key])
-			elseif key and sharedSeed[key] then
-				refTxt = ("ref %.2f%% (grupo)"):format(sharedSeed[key])
-			elseif key then
-				refTxt = "no catalogado en 1.12"
-			else
-				refTxt = "sin id resuelto"
-			end
-			say(("    %-30s %2d/%2d = %5.1f%%  (%du)  · %s"):format(
-				(d.name or "?"):sub(1, 30), d.count or 0, denom, 100 * (d.count or 0) / denom, d.qty or 0, refTxt))
-		end
-	else
-		say(("  |cff808080sin drops medidos todavia (%d cadaveres looteados)|r"):format(e.lootWindows or 0))
+	local found, inPool = {}, 0
+	for key, rec in pairs(e.drops or {}) do
+		local itemID = tonumber(key) or tonumber(rec.id)
+		if itemID and ownSeed[itemID] then inPool = inPool + 1 end
+		found[#found + 1] = {
+			id = itemID,
+			name = rec.name or (itemID and itemName(itemID)) or "?",
+			ref = itemID and (ownSeed[itemID] or sharedSeed[itemID]) or nil,
+		}
 	end
-	if n and (next(ownSeed) ~= nil or next(sharedSeed) ~= nil) then
-		local list = {}
-		for item, chance in pairs(ownSeed) do list[#list + 1] = { item, chance, false } end
-		for item, chance in pairs(sharedSeed) do list[#list + 1] = { item, chance, true } end
-		table.sort(list, function(a, b) return math.abs(a[2]) > math.abs(b[2]) end)
-		say(("  |cffffd200REFERENCIA VANILLA 1.12|r (%d items en la pool):"):format(n))
-		for i = 1, math.min(#list, 12) do
-			local it, ch, shared = list[i][1], list[i][2], list[i][3]
-			local tag = ch < 0 and " |cff8080ff[condicional de quest]" or (shared and " [grupo compartido]" or "")
-			say(("    %-38s %7.2f%%%s"):format(itemName(it):sub(1, 38), ch, tag))
+	table.sort(found, function(a, b) return math.abs(a.ref or -0.01) > math.abs(b.ref or -0.01) end)
+	say(("  |cff00ff00%s|r · %d/%s · %d %s"):format(ns.T("DROPS descubiertos"), inPool,
+		n and tostring(n) or "?", e.lootWindows or 0, ns.T("cadaveres looteados")))
+	if #found > 0 then
+		for _, d in ipairs(found) do
+			local refTxt = d.ref and ("%.2f%%"):format(d.ref) or ns.T("sin dato 1.12")
+			say(("    %-38s %8s"):format((d.name or "?"):sub(1, 38), refTxt))
 		end
-		if #list > 12 then say(("    ... y %d mas"):format(#list - 12)) end
-	elseif n then
-		say(("  la referencia tiene |cffffd200N=%s|r items en la pool, pero su contenido no se empaqueta para mobs comunes:"):format(n))
-		say("  esta lista se llena con lo que lootees vos.")
+		if inPool < (n or 0) then
+			say(("    |cff808080%d %s|r"):format((n or 0) - inPool, ns.T("items de su pool todavia no te tocaron")))
+		end
 	else
-		say("  |cff808080este mob no aparece en la base 1.12|r")
+		say(("    |cff808080%s (%d %s)|r"):format(ns.T("todavia no looteaste nada de este mob"),
+			e.lootWindows or 0, ns.T("cadaveres")))
+		if n then
+			say(("    |cff808080%s %s %s|r"):format(ns.T("su pool tiene"), tostring(n),
+				ns.T("items: se revelan a medida que lootees")))
+		end
 	end
 
 	-- spells: reference list (readable) plus what was observed (identity hidden by the client)
@@ -380,6 +369,8 @@ SlashCmdList["GARCHADEX"] = function(msg)
 		local applied = ns.SetLang(code)
 		ns.DB().meta.lang = (code == "auto") and nil or applied
 		say(("idioma del addon: %s · cliente: %s"):format(applied, tostring(ns.LOCALE)))
+	elseif msg == "art" then
+		if ns.UI and ns.UI.ShowArt then ns.UI.ShowArt() end
 	elseif msg == "bar" then
 		if ns.UI and ns.UI.BuildBar then
 			ns.UI.BuildBar()
@@ -417,22 +408,32 @@ SlashCmdList["GARCHADEX"] = function(msg)
 		else
 			say("targeteá un enemigo o usá /gdx text <npcID>")
 		end
-	elseif msg == "" then
+	elseif msg == "" or msg == "help" then
 		local id = ns.UnitIdentity("target")
-		if id then
-			if ns.UI then
-				ns.UI.Show(id)
-			else
-				ns.PrintEntry(id)
-			end
-		else
-			say("targetea un enemigo o pasá un npc id. Comandos:")
-			print("  |cffffff00/gdx|r ficha del target (ventana)   |cffffff00/gdx <npcID>|r ficha por id")
-			print("  |cffffff00/gdx box|r la ficha en texto copiable  |cffffff00/gdx text|r en el chat")
-			print("  |cffffff00/gdx seed|r estado del seed   |cffffff00/gdx loot|r ultimos looteos vistos")
-			print("  |cffffff00/gdx lang es|en|auto|r idioma   |cffffff00/gdx wipe|r borra lo capturado del target")
-			print("  |cffffff00/gdx stats|r contadores    |cffffff00/gdx test|r render de valores secretos")
+		if id and msg == "" and ns.UI then
+			ns.UI.Show(id)
+			return
 		end
+		say("GarchaDex v" .. tostring(ns.VERSION) .. " · " .. ns.T("comandos:"))
+		print("  |cffffd200/gdx|r |cff808080" .. ns.T("abrir el bestiario") .. "|r")
+		print("  |cffffff00/gdx <npcID>|r |cff808080" .. ns.T("ficha de un npc por id") .. "|r")
+		print("  |cffffff00/gdx box|r |cff808080" .. ns.T("la ficha como texto copiable") .. "|r")
+		print("  |cffffff00/gdx text|r |cff808080" .. ns.T("la ficha en el chat") .. "|r")
+		print("  |cffffff00/gdx news|r |cff808080" .. ns.T("novedades del bestiario") .. "|r")
+		print("  |cffffff00/gdx widget|r |cff808080" .. ns.T("mostrar el widget en pantalla") .. "|r")
+		print("  |cffffff00/gdx stats|r |cff808080" .. ns.T("contadores generales") .. "|r")
+		print("  |cffffff00/gdx seed|r |cff808080" .. ns.T("estado del seed y chequeo crudo") .. "|r")
+		print("  |cffffff00/gdx loot|r |cff808080" .. ns.T("ultimos looteos vistos") .. "|r")
+		print("  |cffffff00/gdx art|r |cff808080" .. ns.T("auditoria de arte del cliente") .. "|r")
+		print("  |cffffff00/gdx test|r |cff808080" .. ns.T("render de valores secretos") .. "|r")
+		print("  |cffffff00/gdx lang es|en|auto|r |cff808080" .. ns.T("idioma del addon") .. "|r")
+		print("  |cffffff00/gdx wipe|r |cff808080" .. ns.T("borra lo capturado del target") .. "|r")
+		print("  |cffffff00/gdx wipe all|r |cff808080" .. ns.T("borra todo lo medido") .. "|r")
+	elseif msg == "news" then
+		if ns.UI then ns.UI.ShowText(ns.T("novedades del bestiario"), ns.DiscoveryText and ns.DiscoveryText() or "") end
+	elseif msg == "widget" then
+		if ns.UI and ns.UI.BuildBar then ns.UI.BuildBar() end
+		say("widget visible (arrastralo; click derecho lo oculta)")
 	else
 		say("no entendi '" .. msg .. "'. Usá /gdx, /gdx <npcID>, /gdx text, /gdx stats, /gdx test")
 	end

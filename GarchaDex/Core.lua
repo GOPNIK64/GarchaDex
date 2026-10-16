@@ -8,7 +8,7 @@
 
 local addonName, ns = ...
 
-ns.VERSION = "0.4.0"
+ns.VERSION = "0.9.0"
 ns.DB_VERSION = 1
 ns.BOSS_KILL_WINDOW = 5
 
@@ -96,6 +96,7 @@ function ns.Entry(id)
 end
 
 function ns.Touch(id, opts)
+	local isNew = not DB.seen[id]
 	local e = ns.Entry(id)
 	if not e then return nil end
 	e.seen = e.seen + 1
@@ -110,6 +111,10 @@ function ns.Touch(id, opts)
 		if opts.classification then e.classification = opts.classification end
 	end
 	if not e.zone and type(GetRealZoneText) == "function" then e.zone = tostringSafe(GetRealZoneText()) end
+	-- the bestiary announces itself: a creature the dex has never recorded before
+	if isNew and ns.Discovery then
+		ns.Discovery.Creature("new_enemy", id, e.zone and ("lo viste por primera vez · " .. e.zone) or "lo viste por primera vez")
+	end
 	return e
 end
 

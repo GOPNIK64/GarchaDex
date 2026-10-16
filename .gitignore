@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+._*
+
+# editors
+.vscode/settings.json
+*.code-workspace
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# build / packaging output
+dist/
+*.zip
+*.tar.gz
+
+# local scratch: client dumps and database copies are large and machine specific
+scratch/
+*.sql
+*.sql.gz
+*.mpq

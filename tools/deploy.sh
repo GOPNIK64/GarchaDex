@@ -15,6 +15,14 @@ if [ ! -d "$WOW_ROOT/$FLAVOR" ]; then
 fi
 mkdir -p "$ADDONS"
 
+# Never deploy text that would reach an English client in Spanish: the phrase table drifts.
+if [ -f "$REPO_DIR/tools/text_audit.py" ]; then
+  if ! python3 "$REPO_DIR/tools/text_audit.py" "$REPO_DIR"/GarchaDex/*.lua; then
+    echo "refusing to deploy: fix the leaked strings in GarchaDex/Locale.lua first" >&2
+    exit 1
+  fi
+fi
+
 for src in "$REPO_DIR"/*/; do
   name="$(basename "$src")"
   case "$name" in tools|data|docs) continue ;; esac
