@@ -1,0 +1,13 @@
+## Interface: 16001
+## Title: GDX Probe
+## Notes: Capability probe for GarchaDex. Read-only. /gdxprobe for the report.
+## Author: Ivan
+## Version: 0.1.0
+## SavedVariables: GDXProbeDB
+## Category: Development
+## IconTexture: Interface\Icons\INV_Misc_QuestionMark
+## AllowLoadGameType: forever
+## ExcludeLoadGameType: standard, classic
+## X-Website: local
+
+Probe.lua

@@ -1,0 +1,20 @@
+## Interface: 16001
+## Title: GarchaDex
+## Notes: Pokedex de enemigos: hechizos que castean y drops con porcentajes. /gdx
+## Author: Ivan
+## Version: 0.4.0
+## SavedVariables: GarchaDexDB
+## Category: Development
+## IconTexture: Interface\Icons\INV_Misc_Book_09
+## AllowLoadGameType: forever
+## ExcludeLoadGameType: standard, classic
+## X-Data: seed generated offline from cmangos classic-db (vanilla 1.12 reference)
+
+data\gdx_seed.lua
+Locale.lua
+Core.lua
+Skin.lua
+Capture.lua
+Display.lua
+UI.lua
+Widgets.lua
