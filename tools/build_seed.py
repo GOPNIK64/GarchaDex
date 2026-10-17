@@ -198,10 +198,17 @@ def build(db_path: str, out_path: str, include_elites: bool = True, all_loot: bo
             continue
         lootn[e] = len(own) + len(exp)
         if all_loot or e in important:
+            # a generic mob usually has several skins: ModelId1..4 in the template. The first is the
+            # one you meet most, the rest are the variants the card's arrow cycles through. Always
+            # write the 8th field ("-" when there are none) because the Lua parser walks non-empty
+            # fields only, and an empty one would shift every field after it.
+            extra = [r[ci["ModelId%d" % k]] for k in (2, 3, 4)]
+            extra = [m for m in extra if m.isdigit() and int(m) > 0]
             npc[e] = "|".join([
                 clean(r[ci["Name"]]), r[ci["MinLevel"]], r[ci["MaxLevel"]],
                 r[ci["Rank"]], r[ci["CreatureType"]], r[ci["ModelId1"]],
                 sorted(spawn_maps.get(e, {"0"}))[0],
+                ",".join(extra) or "-",
             ])
             if own:
                 loots[e] = enc(own)
@@ -278,7 +285,10 @@ def verify(out_path: str, stats: dict) -> list[str]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", default="/Users/naumannthostrup/.hermes/cache/scratch/gdx/classicdb.sql")
-    ap.add_argument("--out", default="data/gdx_seed.lua")
+    ap.add_argument("--out",
+                    default="GarchaDex/data/gdx_seed.lua",
+                    help="the path the ADDON loads (the .toc references data/gdx_seed.lua inside the "
+                         "addon folder): writing anywhere else silently leaves the client on a stale seed")
     ap.add_argument("--no-elites", action="store_true", help="leave world elites (rank 1) out of the static set")
     ap.add_argument("--all-loot", action="store_true",
                     help="bundle every mob's loot contents (not just the important ones): ~1.75 MB instead of ~1.18 MB")

@@ -42,7 +42,19 @@ function ns.UnitIdentity(token)
 	if o3 and not isSecret(v3) then ctype = v3 end
 	local o4, v4 = pcall(UnitClassification, token)
 	if o4 and not isSecret(v4) then class = v4 end
-	return tostring(cid), name, level, ctype, class
+	-- hostile or not decides whether this is a bestiary entry or just an npc walking around
+	local canAttack, reaction
+	if type(UnitCanAttack) == "function" then
+		local o5, v5 = pcall(UnitCanAttack, "player", token)
+		if o5 and not isSecret(v5) then canAttack = v5 end
+	end
+	-- and the reaction keeps the nuance (hostile / neutral / friendly) for later, if the dex ever
+	-- wants three tabs instead of two
+	if type(UnitReaction) == "function" then
+		local o6, v6 = pcall(UnitReaction, "player", token)
+		if o6 and not isSecret(v6) then reaction = v6 end
+	end
+	return tostring(cid), name, level, ctype, class, canAttack, reaction
 end
 
 -- ------------------------------------------------------------------ kills (no combat log: watch the target)
@@ -68,6 +80,11 @@ local function credit(reason)
 end
 ns.CreditWatch = credit
 
+-- the last creature this character killed: the dex opens on it, so it lives next to the credit
+function ns.LastKilled()
+	return lastKilled and lastKilled.id
+end
+
 -- Fallback for the corpse identity: if GetLootSourceInfo gives us nothing, the mob we just
 -- killed (within a few seconds) is the honest guess, and the row gets tagged as such.
 local function recentKill()
@@ -78,17 +95,17 @@ end
 
 function ns.PollTarget()
 	if not ns.IsInCombat() then return end
-	local id, name, level, ctype, class = ns.UnitIdentity("target")
+	local id, name, level, ctype, class, canAttack, reaction = ns.UnitIdentity("target")
 	local ok, dead = pcall(UnitIsDead, "target")
 	dead = ok and dead == true
-	if id and not dead then
+	if id and not dead and canAttack ~= false then
 		if not watching then
 			watching = { id = id }
-			ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class })
+			ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class, hostile = canAttack, reaction = reaction })
 		elseif watching.id ~= id then
 			credit("switched target")
 			watching = { id = id }
-			ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class })
+			ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class, hostile = canAttack, reaction = reaction })
 		end
 	elseif watching then
 		credit(dead and "died" or "gone")
@@ -275,9 +292,8 @@ local function onLootClosed()
 		end
 		if firstWindow then
 			e.lootWindows = (e.lootWindows or 0) + 1
-			if e.lootWindows == 1 and ns.Discovery then
-				ns.Discovery.Creature("first_loot", lootWindow.id, "primer cadaver looteado")
-			end
+			-- no toast for "first loot window": the only loot news worth interrupting for is an item
+			-- it had never dropped for this creature (new_drop). One per corpse, not two.
 		end
 		e.moneyCopper = (e.moneyCopper or 0) + money
 		local added = 0
@@ -403,8 +419,12 @@ local H = {}
 
 function H.PLAYER_TARGET_CHANGED()
 	if ns.IsInCombat() then ns.PollTarget() else
-		local id, name, level, ctype, class = ns.UnitIdentity("target")
-		if id then ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class }) end
+		local id, name, level, ctype, class, canAttack, reaction = ns.UnitIdentity("target")
+		-- the dex is a bestiary: a creature nobody can attack (a vendor, a guard, a quest npc) is
+		-- not an entry, it is scenery. Only untrackable-when-explicitly-friendly.
+		if id and canAttack ~= false then
+			ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class, hostile = canAttack, reaction = reaction })
+		end
 	end
 end
 

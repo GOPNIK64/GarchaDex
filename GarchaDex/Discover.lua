@@ -14,11 +14,12 @@ local D = {}
 ns.Discovery = D
 
 local MAX_TOASTS = 4
-local WIDTH = 330
-local HEIGHT = 54
+local WIDTH = 400           -- starting width (each toast then hugs its own content)
+local HEIGHT = 42           -- short: a wide, thin plate reads better than a tall card
 local GAP = 6
 local HOLD = 6.5            -- seconds a toast stays up
 local FADE = 0.35
+local TOP_OFFSET = 26       -- px from the top edge for the first toast: kills and loot share the stack
 local LOG_MAX = 60
 
 local toasts, queue, live = {}, {}, 0
@@ -27,7 +28,6 @@ local KIND = {
 	new_enemy   = { head = "nueva entrada",     icon = "Interface\\Icons\\INV_Misc_Book_09" },
 	first_kill  = { head = "primer abatido",    icon = "Interface\\Icons\\INV_Sword_04" },
 	first_death = { head = "te mato",           icon = "Interface\\Icons\\Ability_Warrior_EndlessRage" },
-	first_loot  = { head = "primer looteo",     icon = "Interface\\Icons\\INV_Misc_Bag_07" },
 	new_drop    = { head = "nuevo drop",        icon = "Interface\\Icons\\INV_Misc_QuestionMark" },
 	first_cast  = { head = "castea",            icon = "Interface\\Icons\\Spell_Holy_MagicalSentry" },
 	pool_done   = { head = "entrada completa",  icon = "Interface\\Icons\\INV_Misc_Book_09" },
@@ -59,15 +59,17 @@ end
 -- ------------------------------------------------------------------ the toast
 
 local function toastY(index)
-	local uh = (UIParent and UIParent:GetHeight()) or 768
-	return uh / 2 - 120 - (index - 1) * (HEIGHT + GAP) - HEIGHT / 2
+	-- how far below the TOP edge this slot sits: measured from the edge, so the first toast is
+	-- always TOP_OFFSET px from the top of the screen whatever the UI scale does
+	return -(TOP_OFFSET + (index - 1) * (HEIGHT + GAP))
 end
 
 local function newToast(index)
 	local f = CreateFrame("Frame", nil, UIParent)
 	f:SetSize(WIDTH, HEIGHT)
-	-- anchored to the centre of the screen: a TOP anchor is not centred on every UI scale
-	f:SetPoint("CENTER", UIParent, "CENTER", 0, toastY(index))
+	-- anchored by its TOP edge with x = 0: that is centred on screen, and the y is a plain distance
+	-- from the top edge instead of arithmetic around the centre
+	f:SetPoint("TOP", UIParent, "TOP", 0, toastY(index))
 	f.slot = index
 	f:SetFrameStrata("HIGH")
 	f:SetClampedToScreen(true)
@@ -83,29 +85,29 @@ local function newToast(index)
 	-- the creature itself, in 3d, like a bestiary plate: the model replaces the flat icon
 	local model = CreateFrame("PlayerModel", nil, f)
 	if not model then model = CreateFrame("Model", nil, f) end
-	model:SetSize(42, 42)
-	model:SetPoint("LEFT", 6, 0)
+	model:SetSize(32, 32)
+	model:SetPoint("LEFT", 5, 0)
 	model:Hide()
 	f.model = model
 
 	local icon = f:CreateTexture(nil, "ARTWORK")
-	icon:SetSize(38, 38)
-	icon:SetPoint("LEFT", 8, 0)
+	icon:SetSize(30, 30)
+	icon:SetPoint("LEFT", 6, 0)
 	icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 	f.icon = icon
 
 	local head = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-	head:SetPoint("TOPLEFT", 54, -5)
+	head:SetPoint("TOPLEFT", 44, -3)
 	head:SetTextColor(S.C.gold[1], S.C.gold[2], S.C.gold[3])
 	f.head = head
 	local name = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	name:SetPoint("TOPLEFT", 54, -19)
-	name:SetWidth(WIDTH - 64)
+	name:SetPoint("TOPLEFT", 44, -15)
+	name:SetWidth(WIDTH - 52)
 	name:SetJustifyH("LEFT")
 	f.name = name
 	local detail = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-	detail:SetPoint("TOPLEFT", 54, -34)
-	detail:SetWidth(WIDTH - 64)
+	detail:SetPoint("TOPLEFT", 44, -27)
+	detail:SetWidth(WIDTH - 52)
 	detail:SetJustifyH("LEFT")
 	f.detail = detail
 
@@ -148,10 +150,19 @@ local function paint(f, rec)
 	f.count = 1
 	-- keep every toast centred, whatever the UI scale did since the frame was created
 	f:ClearAllPoints()
-	f:SetPoint("CENTER", UIParent, "CENTER", 0, toastY(f.slot or 1))
+	f:SetPoint("TOP", UIParent, "TOP", 0, toastY(f.slot or 1))
 	f.head:SetText("|cff3fd15a" .. ns.T(kind.head or rec.kind) .. "|r")
 	f.name:SetText(rec.name or ("npc " .. tostring(rec.id)))
 	f.detail:SetText(ns.T(rec.detail or ""))
+	-- Hug the content. A fixed-width box with left-aligned text inside reads as shifted to the left
+	-- on screen, because the empty strip on the right is part of what the eye measures.
+	f.name:SetWidth(0)     -- 0 = unconstrained, so the string measures on one line
+	f.detail:SetWidth(0)
+	local w = math.max(f.head:GetStringWidth() or 0, f.name:GetStringWidth() or 0, f.detail:GetStringWidth() or 0)
+	local boxW = math.max(300, math.min(560, math.ceil(w) + 70))
+	f:SetWidth(boxW)
+	f.name:SetWidth(boxW - 52)
+	f.detail:SetWidth(boxW - 52)
 	-- a creature discovery shows the creature: its 3d model when the seed knows it, else a portrait
 	local drew = false
 	if rec.creature and rec.displayID and f.model then

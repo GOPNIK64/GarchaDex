@@ -21,6 +21,13 @@ local C = S.C
 
 local frame, rows, body
 local listRows, listFilter, listOffset, listCache, listCount
+-- forward declaration: newListRow's wheel handler calls it, and a local declared further down would
+-- resolve to a nil global inside that closure (the index would simply refuse to scroll)
+local rebuildList
+local modelIdx = 1   -- which of the creature's skins the card is showing
+local modelRotation = 0.6   -- and at what angle: dragging the model changes it, the DB remembers it
+local modelZoom = 0.85      -- how close the camera sits: the wheel over the model changes it too
+local ROT_PER_PIXEL = 0.010 -- drag sensitivity: one constant, because feel is a matter of taste
 local currentID
 
 local ROW_H = 18
@@ -67,19 +74,28 @@ local function seedMeta(id)
 	if not s then return nil end
 	local f = {}
 	for part in string.gmatch(s, "[^|]+") do f[#f + 1] = part end
-	return { name = f[1], minLevel = f[2], maxLevel = f[3], rank = f[4], ctype = f[5], model = f[6], map = f[7] }
+	return { name = f[1], minLevel = f[2], maxLevel = f[3], rank = f[4], ctype = f[5], model = f[6], map = f[7], models = f[8] }
 end
 
 local RANK = { ["0"] = "normal", ["1"] = "elite", ["2"] = "elite raro", ["3"] = "jefe", ["4"] = "raro" }
 local CTYPE = { ["1"] = "Bestia", ["2"] = "Dragonkin", ["3"] = "Demonio", ["4"] = "Elemental", ["5"] = "Gigante",
 	["6"] = "No-muerto", ["7"] = "Humanoide", ["8"] = "Critter", ["9"] = "Mecanico", ["11"] = "Totem" }
 
+-- gold is the one number that is pure fun: what this creature paid you, account-wide
+local function copper(n)
+	n = math.floor((n or 0) + 0.5)
+	local g, s, c = math.floor(n / 10000), math.floor((n % 10000) / 100), n % 100
+	if g > 0 then return ("%dg %ds"):format(g, s) end
+	if s > 0 then return ("%ds %dc"):format(s, c) end
+	return ("%dc"):format(c)
+end
+
 -- ------------------------------------------------------------------ left pane: the index of what you found
 
 local function newListRow(i)
 	local r = CreateFrame("Button", nil, frame.listPane)
 	r:SetHeight(LIST_ROW_H)
-	r:SetPoint("TOPLEFT", frame.listPane, "TOPLEFT", 6, -(i - 1) * LIST_ROW_H - 26)
+	r:SetPoint("TOPLEFT", frame.listPane, "TOPLEFT", 6, -(i - 1) * LIST_ROW_H - 28)
 	r:SetPoint("RIGHT", frame.listPane, "RIGHT", -6, 0)
 	local sel = S.tex(r, C.accent[1], C.accent[2], C.accent[3], 0.22, "BACKGROUND")
 	sel:SetAllPoints(r)
@@ -105,20 +121,32 @@ local function newListRow(i)
 		GameTooltip:AddLine(self.entry.name, C.gold[1], C.gold[2], C.gold[3])
 		GameTooltip:AddLine(("id %s · lvl %s · %s"):format(self.entry.id, tostring(e.level or "?"),
 			tostring(e.creatureType or "?")), 0.8, 0.8, 0.8)
+		-- the fun number, right under the name: what this creature has paid you so far
+		GameTooltip:AddLine(("%s: %s"):format(ns.T("oro"), copper(e.moneyCopper or 0)), 1, 0.82, 0)
+		GameTooltip:AddLine(("%s: %s"):format(ns.T("kills"), tostring(e.kills or 0)), 0.7, 0.7, 0.7)
 		GameTooltip:Show()
 	end)
 	r:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	-- the same for the list: the row is a button, the wheel has to reach the pane
+	r:EnableMouseWheel(true)
+	r:SetScript("OnMouseWheel", function(_, delta)
+		listOffset = math.max(0, math.min(math.max(0, (listCount or 0) - LIST_ROWS), (listOffset or 0) - delta))
+		rebuildList()
+	end)
 	return r
 end
 
-local function rebuildList()
+function rebuildList()
 	local seen = ns.DB().seen
 	local filter = string.lower((listFilter and listFilter:GetText()) or "")
+	-- the dex is a bestiary: only creatures you can fight. Entries captured before hostility was
+	-- recorded (no field) are kept, since they came from a target that was attackable then.
 	local list = {}
-	-- the dex is what you FOUND: only creatures you have actually met
 	for id, e in pairs(seen) do
-		local name = e.name or (ns.npc and ns.npc[id] and string.match(ns.npc[id], "^[^|]+")) or ("npc " .. id)
-		list[#list + 1] = { id = id, name = name, e = e }
+		if e.hostile ~= false then
+			local name = e.name or (ns.npc and ns.npc[id] and string.match(ns.npc[id], "^[^|]+")) or ("npc " .. id)
+			list[#list + 1] = { id = id, name = name, e = e }
+		end
 	end
 	table.sort(list, function(a, b)
 		if (a.e.seen or 0) ~= (b.e.seen or 0) then return (a.e.seen or 0) > (b.e.seen or 0) end
@@ -209,6 +237,11 @@ local function newRow(index)
 		GameTooltip:Show()
 	end)
 	r:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	-- wheel over a row must scroll the card, not die on the button
+	r:EnableMouseWheel(true)
+	r:SetScript("OnMouseWheel", function(_, delta)
+		if body and body.ScrollBy then body.ScrollBy(delta) end
+	end)
 	return r
 end
 
@@ -304,9 +337,9 @@ local function section(i, txt, colour)
 	return r
 end
 
-local function chip(parent, x, y, label)
+local function chip(parent, x, y, label, w)
 	local f = CreateFrame("Frame", nil, parent)
-	f:SetSize(62, 32)
+	f:SetSize(w or 62, 32)
 	f:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
 	local bg = S.tex(f, 0.12, 0.08, 0.04, 0.9, "BACKGROUND")
 	bg:SetAllPoints(f)
@@ -324,12 +357,26 @@ end
 
 -- ------------------------------------------------------------------ render the right pane
 
+-- One guarded call per method. This client's model widget is missing several PlayerModel methods,
+-- and a single absent one used to fail the whole pcall and hide the artwork: the blank portrait.
+local function mcall(model, method, ...)
+	local fn = model and model[method]
+	if type(fn) ~= "function" then return false end
+	local ok = pcall(fn, model, ...)
+	return ok and true or false
+end
+
 local function renderCard(id)
 	if not frame then return false end
 	id = id and tostring(id) or nil
 	if not id and ns.UnitIdentity then id = ns.UnitIdentity("target") end
 	if not id then
-		-- nothing selected: fall back to the first creature of the index, so the pane is never empty
+		-- the dex opens on the last thing you killed: that is what you came back to look at
+		local last = ns.LastKilled and ns.LastKilled()
+		if last and ns.DB().seen[tostring(last)] then id = tostring(last) end
+	end
+	if not id then
+		-- nothing else: fall back to the first creature of the index, so the pane is never empty
 		rebuildList()
 		if listCache and listCache[1] then id = tostring(listCache[1].id) end
 	end
@@ -341,14 +388,17 @@ local function renderCard(id)
 		frame.sub:SetText(ns.T("targetea algo y va a aparecer en el indice de la izquierda"))
 		frame.portrait:Hide()
 		frame.portraitFrame:Hide()
+		if frame.modelBar then frame.modelBar:Hide() end
 		if frame.model then frame.model:Hide() end
 		body.content:SetHeight(24)
 		body.offset = 0
 		body.Update()
 		return true
 	end
+	local sameCard = (currentID == id)
 	currentID = id
 	UI.currentID = id
+	if not sameCard then modelIdx = 1 end
 	local e = ns.DB().seen[id]
 	local meta = seedMeta(id)
 
@@ -374,31 +424,66 @@ local function renderCard(id)
 	frame.chipKills.value:SetText(tostring(e and e.kills or 0))
 	frame.chipLoot.value:SetText(tostring(e and e.lootWindows or 0))
 	frame.chipDeaths.value:SetText(tostring(e and e.deaths or 0))
+	frame.chipGold.value:SetText(copper(e and e.moneyCopper or 0))
+	frame.chipGold.value:SetTextColor(S.C.gold[1], S.C.gold[2], S.C.gold[3])
 
-	-- art: live portrait for a real target, the seed's display id for a known creature
+	-- art: live portrait for a real target, otherwise the 3d model of this creature's skin.
+	-- A generic mob usually has several skins (ModelId1..4 in the seed, plus any variant this account
+	-- met live), so the strip under the portrait cycles them.
+	local variants = {}
+	local function addVariant(v)
+		v = tonumber(v)
+		if not v or v <= 0 then return end
+		for _, x in ipairs(variants) do
+			if x == v then return end
+		end
+		variants[#variants + 1] = v
+	end
+	if meta then
+		addVariant(meta.model)
+		for v in string.gmatch(meta.models or "", "[^,]+") do addVariant(v) end
+	end
+	if e and e.models then
+		for v in pairs(e.models) do addVariant(v) end
+	end
+	if #variants == 0 then modelIdx = 1 elseif modelIdx > #variants then modelIdx = 1 end
+	frame.variants = variants
+	if frame.modelBar then
+		frame.modelBar.count:SetText(modelIdx .. "/" .. #variants)
+		frame.modelBar:SetShown(#variants > 1)
+	end
+
 	local drew = false
 	if ns.frame and ns.frame.PortraitFor and live == id then
 		drew = ns.frame.PortraitFor(frame.portrait, "target")
 	end
 	if frame.model then frame.model:Hide() end
-	if not drew and meta and meta.model and frame.model then
-		local mid = tonumber(meta.model)
-		local ok = pcall(function()
-			frame.model:SetModelByCreatureDisplayID(mid)
-			frame.model:SetPortraitZoom(1)
-			frame.model:SetCamDistanceScale(0.85)
-			frame.model:SetPosition(0, 0, 0)
-			frame.model:SetRotation(0.6)
-			frame.model:Show()
-		end)
-		if not ok then
-			ok = pcall(function()
-				frame.model:SetDisplayInfo(mid)
-				frame.model:SetPortraitZoom(1)
-				frame.model:Show()
-			end)
+	local mid = variants[modelIdx]
+	if not drew and frame.model then
+		-- the same skin, in every generation of the API: whichever this client actually has wins.
+		-- Each call is guarded on its own, so one missing method no longer sinks the others.
+		local function place()
+			if mid then
+				if mcall(frame.model, "SetModelByCreatureDisplayID", mid) then return "SetModelByCreatureDisplayID" end
+				if mcall(frame.model, "SetCreatureDisplayID", mid) then return "SetCreatureDisplayID" end
+				if mcall(frame.model, "SetDisplayInfo", mid) then return "SetDisplayInfo" end
+			end
+			-- last resort: the creature id itself, for a model widget that only knows SetCreature
+			if tonumber(id) and mcall(frame.model, "SetCreature", tonumber(id)) then return "SetCreature" end
+			return nil
 		end
-		drew = ok and true or false
+		local used = place()
+		if used then
+			mcall(frame.model, "SetPortraitZoom", 1)
+			mcall(frame.model, "SetCamDistanceScale", modelZoom)
+			mcall(frame.model, "SetPosition", 0, 0, 0)
+			mcall(frame.model, "SetRotation", modelRotation)
+			frame.model:Show()
+			-- a model frame that was hidden often paints blank on the first set: re-apply it visible
+			place()
+			ns.artMethod = used
+			drew = true
+		end
 	end
 	if frame.model and frame.model:IsShown() then
 		frame.portrait:Hide()
@@ -579,6 +664,14 @@ function UI.Show(id)
 	return ok
 end
 
+-- the arrows under the portrait: cycle the skins of the creature you are looking at
+function UI.CycleModel(dir)
+	local n = (frame and frame.variants) and #frame.variants or 0
+	if n < 2 or not currentID then return end
+	modelIdx = ((modelIdx - 1 + (dir or 1)) % n) + 1
+	renderCard(currentID)
+end
+
 -- the toolbar's Index button: same window, the list is what matters
 function UI.ShowIndex()
 	UI.Show()
@@ -607,13 +700,38 @@ function UI.Create()
 	lpbg:SetAllPoints(listPane)
 	S.Border(listPane, C.border)
 
-	listFilter = CreateFrame("EditBox", nil, listPane)
-	listFilter:SetSize(LIST_W - 12, 18)
-	listFilter:SetPoint("TOPLEFT", 6, -4)
+	-- a search box that reads as a search box: its own well, a border, a magnifier and a hint, or it
+	-- looks like another list row and nobody finds it
+	local fw = CreateFrame("Frame", nil, listPane)
+	fw:SetSize(LIST_W - 12, 20)
+	fw:SetPoint("TOPLEFT", 6, -4)
+	local fwbg = S.tex(fw, 0.02, 0.015, 0.01, 1, "BACKGROUND")
+	fwbg:SetAllPoints(fw)
+	S.Border(fw, C.trim)
+	local lupa = fw:CreateTexture(nil, "OVERLAY")
+	lupa:SetSize(13, 13)
+	lupa:SetPoint("LEFT", 5, 0)
+	-- ask the client whether the atlas exists instead of trusting pcall: a missing atlas does not
+	-- raise, it just draws nothing, and the box would look empty
+	if C_Texture and C_Texture.GetAtlasExists and C_Texture.GetAtlasExists("common-search-magnifyingglass") then
+		lupa:SetAtlas("common-search-magnifyingglass")
+	else
+		lupa:SetTexture("Interface\\Icons\\INV_Misc_Spyglass_02")
+	end
+	fw.hint = fw:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	fw.hint:SetPoint("LEFT", 22, 0)
+	fw.hint:SetText(ns.T("buscar por nombre o id"))
+	fw.hint:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
+	frame.filterFrame = fw
+
+	listFilter = CreateFrame("EditBox", nil, fw)
+	listFilter:SetSize(LIST_W - 46, 18)
+	listFilter:SetPoint("LEFT", 22, 0)
 	listFilter:SetAutoFocus(false)
 	listFilter:SetFontObject("ChatFontNormal")
 	pcall(function() listFilter:SetPropagateKeyboardInput(false) end)
-	listFilter:SetScript("OnTextChanged", function()
+	listFilter:SetScript("OnTextChanged", function(f)
+		fw.hint:SetShown(f:GetText() == "")
 		listOffset = 0
 		rebuildList()
 	end)
@@ -648,55 +766,125 @@ function UI.Create()
 	local head = CreateFrame("Frame", nil, pane)
 	head:SetPoint("TOPLEFT", 0, 0)
 	head:SetPoint("TOPRIGHT", 0, 0)
-	head:SetHeight(76)
+	head:SetHeight(112)   -- tall enough for a 102px portrait: the creature is the point of the card
 	local hbg = S.tex(head, 0.11, 0.07, 0.04, 0.6, "BACKGROUND")
 	hbg:SetAllPoints(head)
 	frame.head = head
 
 	local portraitFrame = CreateFrame("Frame", nil, head)
-	portraitFrame:SetSize(66, 66)
+	portraitFrame:SetSize(102, 102)
 	portraitFrame:SetPoint("TOPLEFT", 2, -3)
 	portraitFrame:SetFrameLevel(head:GetFrameLevel() + 3)
 	S.Border(portraitFrame, C.accent)
 	frame.portraitFrame = portraitFrame
+
+	-- the skin strip: "< 1/3 >" pinned to the bottom edge of the portrait. Above the model's frame
+	-- level, or the model (drawn 2 levels higher) would cover it.
+	local bar = CreateFrame("Frame", nil, head)
+	bar:SetSize(102, 14)
+	bar:SetPoint("BOTTOMLEFT", portraitFrame, "BOTTOMLEFT", 0, 0)
+	bar:SetFrameLevel(head:GetFrameLevel() + 5)
+	local bbg = S.tex(bar, 0.02, 0.015, 0.01, 0.75, "BACKGROUND")
+	bbg:SetAllPoints(bar)
+	local function arrow(sym, x, dir)
+		local b = CreateFrame("Button", nil, bar)
+		b:SetSize(16, 14)
+		b:SetPoint("LEFT", x, 0)
+		local t = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+		t:SetPoint("CENTER", 0, 0)
+		t:SetText("|cffd4a94c" .. sym .. "|r")
+		b:SetScript("OnClick", function() UI.CycleModel(dir) end)
+		return b
+	end
+	arrow("<", 0, -1)
+	arrow(">", 86, 1)
+	bar.count = bar:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	bar.count:SetPoint("CENTER", 0, 0)
+	bar.count:SetTextColor(C.grey[1], C.grey[2], C.grey[3])
+	bar:Hide()
+	frame.modelBar = bar
 
 	local okModel, model = pcall(CreateFrame, "PlayerModel", nil, head)
 	if not okModel then
 		okModel, model = pcall(CreateFrame, "Model", nil, head)
 	end
 	if okModel and model then
-		model:SetSize(64, 64)
-		model:SetPoint("TOPLEFT", 3, -4)
+		model:SetSize(98, 98)
+		model:SetPoint("TOPLEFT", 4, -5)
 		model:SetFrameLevel(head:GetFrameLevel() + 2)
 		model:Hide()
 	end
 	frame.model = model
 
+	-- Dragging the model spins it, like the character sheet. The angle lives account-wide, so the
+	-- pose you like survives a reload.
+	if model then
+		modelRotation = tonumber(ns.DB().meta.modelRotation) or 0.6
+		modelZoom = tonumber(ns.DB().meta.modelZoom) or 0.85
+		model:EnableMouse(true)
+		model:RegisterForDrag("LeftButton")
+		model:SetScript("OnDragStart", function(self)
+			if GameTooltip then GameTooltip:Hide() end
+			local from = GetCursorPosition() / UIParent:GetEffectiveScale()
+			local base = modelRotation
+			self:SetScript("OnUpdate", function()
+				local now = GetCursorPosition() / UIParent:GetEffectiveScale()
+				modelRotation = base + (now - from) * ROT_PER_PIXEL
+				mcall(self, "SetRotation", modelRotation)
+			end)
+		end)
+		model:SetScript("OnDragStop", function(self)
+			self:SetScript("OnUpdate", nil)
+			local db = ns.DB()
+			if db then db.meta.modelRotation = modelRotation end
+		end)
+		-- the wheel zooms: a small plate needs the range more than the precision
+		model:EnableMouseWheel(true)
+		model:SetScript("OnMouseWheel", function(self, delta)
+			modelZoom = math.max(0.30, math.min(2.00, modelZoom - (delta or 0) * 0.06))
+			mcall(self, "SetCamDistanceScale", modelZoom)
+			local db = ns.DB()
+			if db then db.meta.modelZoom = modelZoom end
+		end)
+		-- otherwise nobody discovers either one: it is a portrait, not an obvious control
+		model:SetScript("OnEnter", function(self)
+			if self:GetScript("OnUpdate") then return end
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:AddLine(ns.T("arrastra para rotar"), 1, 1, 1)
+			GameTooltip:AddLine(ns.T("rueda para acercar"), 0.7, 0.7, 0.7)
+			GameTooltip:Show()
+		end)
+		model:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	end
+
 	local portrait = head:CreateTexture(nil, "ARTWORK")
-	portrait:SetSize(64, 64)
-	portrait:SetPoint("TOPLEFT", 3, -4)
+	portrait:SetSize(98, 98)
+	portrait:SetPoint("TOPLEFT", 4, -5)
 	portrait:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 	frame.portrait = portrait
 
 	local name = head:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-	name:SetPoint("TOPLEFT", 78, -6)
+	name:SetPoint("TOPLEFT", 114, -8)
 	name:SetJustifyH("LEFT")
-	name:SetWidth(210)
+	name:SetWidth(430)
 	frame.name = name
 	local sub = head:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	sub:SetPoint("TOPLEFT", 78, -30)
+	sub:SetPoint("TOPLEFT", 114, -32)
 	sub:SetJustifyH("LEFT")
-	sub:SetWidth(210)
+	sub:SetWidth(430)
 	sub:SetTextColor(C.grey[1], C.grey[2], C.grey[3])
 	frame.sub = sub
 
-	-- two rows of two chips on the right of the header
-	frame.chipSeen = chip(head, 366, -4, "visto")
-	frame.chipKills = chip(head, 434, -4, "kills")
-	frame.chipLoot = chip(head, 366, -40, "looteado")
-	frame.chipDeaths = chip(head, 434, -40, "te mato")
+	-- the header of a real card: portrait on the left, name and identity to its right, then the five
+	-- counters in a row underneath, because with a portrait this big there is no room to stack them
+	-- at the right edge
+	frame.chipSeen = chip(head, 114, -52, "visto", 70)
+	frame.chipKills = chip(head, 190, -52, "kills", 70)
+	frame.chipGold = chip(head, 266, -52, "oro", 70)
+	frame.chipLoot = chip(head, 342, -52, "looteado", 70)
+	frame.chipDeaths = chip(head, 418, -52, "te mato", 70)
 
-	body = S.ScrollArea(pane, 0, -84, PANE_W, PANE_H - 84)
+	body = S.ScrollArea(pane, 0, -120, PANE_W, PANE_H - 120)
 	frame.body = body
 	rows = {}
 

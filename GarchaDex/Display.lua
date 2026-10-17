@@ -261,6 +261,8 @@ function ns.PrintStats()
 		type(ns.lootn) == "table" and "si" or "NO",
 		type(ns.spell) == "table" and "si" or "NO",
 		mobs, kills, casts, c.kills or 0, c.loots or 0, c.nodes or 0))
+	-- which model call this client accepted: the only way to know without reading its binary
+	say("arte 3d: " .. tostring(ns.artMethod or "todavia no dibuje ningun modelo"))
 	say(("loot no atribuido: %s · ultimo source: %s"):format(
 		tostring(db.meta.lastLootUnattributed or 0), tostring(db.meta.lastLootSource or "todavia nada")))
 	local fb = 0

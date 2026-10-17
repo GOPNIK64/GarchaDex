@@ -234,7 +234,9 @@ function S.ScrollArea(parent, x, y, w, h)
 		if area.offset > over then area.offset = over end
 		if area.offset < 0 then area.offset = 0 end
 		content:ClearAllPoints()
-		content:SetPoint("TOPLEFT", area, "TOPLEFT", 2, 2 - area.offset)
+		-- +offset moves the content UP (later rows into view): the sign matters, a minus here
+		-- leaves a blank band at the top and cuts the bottom, which reads as "the scroll is broken"
+		content:SetPoint("TOPLEFT", area, "TOPLEFT", 2, 2 + area.offset)
 		local span = math.min(viewH, math.max(24, viewH * (viewH / math.max(1, contentH))))
 		local frac = (over > 0) and (area.offset / over) or 0
 		thumb:SetHeight(span)
@@ -244,11 +246,17 @@ function S.ScrollArea(parent, x, y, w, h)
 		thumb:SetShown(over > 0)
 	end
 
-	area:EnableMouseWheel(true)
-	area:SetScript("OnMouseWheel", function(self, delta)
-		self.offset = self.offset - delta * 34
+	function area.ScrollBy(delta)
+		area.offset = area.offset - delta * 34
 		area.Update()
-	end)
+	end
+
+	area:EnableMouseWheel(true)
+	area:SetScript("OnMouseWheel", function(self, delta) self.ScrollBy(delta) end)
+	-- the rows inside are buttons with the mouse enabled: they must pass the wheel along, or the
+	-- pane never scrolls while the cursor is over content
+	content:EnableMouseWheel(true)
+	content:SetScript("OnMouseWheel", function(_, delta) area.ScrollBy(delta) end)
 	area.Update()
 	return area
 end
@@ -289,6 +297,10 @@ function S.Button(parent, label, w, h, tip, onClick)
 		b:SetSize(w or 64, h or 20)
 		b:SetText(label)
 		b:SetScript("OnClick", onClick)
+		-- one label setter for both branches: the classic template owns the font string
+		b.SetLabel = function(self, text)
+			if self.fs then self.fs:SetText(text) else self:SetText(text) end
+		end
 		if tip then
 			b:SetScript("OnEnter", function(self)
 				GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -313,6 +325,9 @@ function S.Button(parent, label, w, h, tip, onClick)
 	fs:SetPoint("CENTER")
 	fs:SetText(label)
 	b.fs = fs
+	b.SetLabel = function(self, text)
+		if self.fs then self.fs:SetText(text) else self:SetText(text) end
+	end
 	b:SetScript("OnClick", onClick)
 	if tip then
 		b:SetScript("OnEnter", function(self)

@@ -8,7 +8,7 @@
 
 local addonName, ns = ...
 
-ns.VERSION = "0.9.0"
+ns.VERSION = "0.9.12"
 ns.DB_VERSION = 1
 ns.BOSS_KILL_WINDOW = 5
 
@@ -109,10 +109,19 @@ function ns.Touch(id, opts)
 		if opts.level then e.level = opts.level end
 		if opts.creatureType and not e.creatureType then e.creatureType = opts.creatureType end
 		if opts.classification then e.classification = opts.classification end
+		-- INVARIANT (account-wide dex, per-faction truth): `hostile` is only ever written from a
+		-- creature the current character CAN attack, so it can be true or unset, never false.
+		-- A friendly target is never recorded and never flips an existing entry: that is what keeps
+		-- two characters of opposite factions from fighting over the same row. Do not "fix" this by
+		-- storing false here, and do not filter by it: the index is a list of what is attackable,
+		-- and which character met which creature already lives in e.chars.
+		if opts.hostile ~= nil then e.hostile = opts.hostile end
+		if opts.reaction ~= nil then e.reaction = opts.reaction end
 	end
 	if not e.zone and type(GetRealZoneText) == "function" then e.zone = tostringSafe(GetRealZoneText()) end
-	-- the bestiary announces itself: a creature the dex has never recorded before
-	if isNew and ns.Discovery then
+	-- the bestiary announces itself: a creature the dex has never recorded before.
+	-- A friendly npc is recorded (it has its own tab) but never announced: this is a bestiary.
+	if isNew and ns.Discovery and e.hostile ~= false then
 		ns.Discovery.Creature("new_enemy", id, e.zone and ("lo viste por primera vez · " .. e.zone) or "lo viste por primera vez")
 	end
 	return e

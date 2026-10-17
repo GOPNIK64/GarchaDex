@@ -170,9 +170,29 @@ end
 -- back, and it remembers where it was left.
 local widget
 
+-- Stored as a TOPLEFT/TOPLEFT pair measured in UIParent's own space, because that is stable: the
+-- anchor pair the client leaves behind after a drag (often a CENTER against a differently sized
+-- UIParent) lands somewhere else once the UI scale settles. Same reason it is re-applied on
+-- PLAYER_ENTERING_WORLD and not only at creation.
 local function saveWidgetPos()
-	local p, _, rp, x, y = widget:GetPoint(1)
-	ns.DB().meta.widgetPos = { p = p, rp = rp, x = x, y = y }
+	local db = ns.DB()
+	if not db or not widget then return end
+	local l, t = widget:GetLeft(), widget:GetTop()
+	if l and t and UIParent and UIParent:GetHeight() then
+		db.meta.widgetPos = { p = "TOPLEFT", rp = "TOPLEFT", x = l, y = t - UIParent:GetHeight() }
+	else
+		local p, _, rp, x, y = widget:GetPoint(1)
+		db.meta.widgetPos = { p = p, rp = rp, x = x, y = y }
+	end
+end
+
+local function applyWidgetPos()
+	local db = ns.DB()
+	local pos = db and db.meta and db.meta.widgetPos
+	if not widget or not pos or not pos.p then return false end
+	widget:ClearAllPoints()
+	widget:SetPoint(pos.p, UIParent, pos.rp or pos.p, pos.x or 0, pos.y or 0)
+	return true
 end
 
 function UI.BuildBar()
@@ -229,10 +249,15 @@ function UI.BuildBar()
 	end)
 
 	local pos = ns.DB().meta.widgetPos
-	if pos and pos.p then
-		widget:ClearAllPoints()
-		widget:SetPoint(pos.p, UIParent, pos.rp or pos.p, pos.x or 0, pos.y or 0)
-	end
+	if pos and pos.p then applyWidgetPos() end
 	return widget
 end
+
+-- the UI scale is only final after the world loads: without this the widget would snap back to a
+-- clamped position on every login, which is what "it moves when I reload" looks like
+local follower = CreateFrame("Frame")
+follower:RegisterEvent("PLAYER_ENTERING_WORLD")
+follower:SetScript("OnEvent", function()
+	if widget and widget:IsShown() then applyWidgetPos() end
+end)
 
