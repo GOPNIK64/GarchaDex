@@ -358,6 +358,11 @@ SlashCmdList["GARCHADEX"] = function(msg)
 	msg = string.lower(msg or "")
 	if msg == "stats" then
 		ns.PrintStats()
+	elseif msg == "progreso" or msg == "progress" then
+		if ns.UI then
+			ns.UI.Show()
+			ns.UI.SetTab("progress")
+		end
 	elseif msg == "test" then
 		renderSecretTest()
 	elseif msg:match("^%d+$") then
@@ -424,6 +429,7 @@ SlashCmdList["GARCHADEX"] = function(msg)
 		print("  |cffffff00/gdx news|r |cff808080" .. ns.T("novedades del bestiario") .. "|r")
 		print("  |cffffff00/gdx widget|r |cff808080" .. ns.T("mostrar el widget en pantalla") .. "|r")
 		print("  |cffffff00/gdx stats|r |cff808080" .. ns.T("contadores generales") .. "|r")
+		print("  |cffffff00/gdx progreso|r |cff808080" .. ns.T("cuanto del bestiario llevas") .. "|r")
 		print("  |cffffff00/gdx seed|r |cff808080" .. ns.T("estado del seed y chequeo crudo") .. "|r")
 		print("  |cffffff00/gdx loot|r |cff808080" .. ns.T("ultimos looteos vistos") .. "|r")
 		print("  |cffffff00/gdx art|r |cff808080" .. ns.T("auditoria de arte del cliente") .. "|r")

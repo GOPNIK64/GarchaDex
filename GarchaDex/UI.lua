@@ -28,6 +28,8 @@ local modelIdx = 1   -- which of the creature's skins the card is showing
 local modelRotation = 0.6   -- and at what angle: dragging the model changes it, the DB remembers it
 local modelZoom = 0.85      -- how close the camera sits: the wheel over the model changes it too
 local ROT_PER_PIXEL = 0.010 -- drag sensitivity: one constant, because feel is a matter of taste
+local uiTab = "card"        -- which of the two right-hand panes is showing
+local seedTotal             -- how many creatures the bundled seed carries, counted once
 local currentID
 
 local ROW_H = 18
@@ -562,32 +564,43 @@ local function renderCard(id)
 	-- drops: the whole pool is shown as slots. Looted ones carry their name, the rest stay hidden
 	-- behind a "?" with the same static 1.12 chance, so the dex is something you complete.
 	local ownSeed, sharedSeed = ns.ParseLoot(ns.SeedLoot(id))
-	local n = ns.SeedN(id)
 	local got = {}
 	for key, rec in pairs((e and e.drops) or {}) do
 		local itemID = tonumber(key) or tonumber(rec.id)
 		if itemID then got[itemID] = rec end
 	end
-	local pool, seen = {}, {}
-	for itemID, chance in pairs(ownSeed) do
-		if not seen[itemID] then
-			seen[itemID] = true
-			pool[#pool + 1] = { id = itemID, chance = chance }
+	-- A negative chance marks a quest-conditional row: it does not roll unless the quest is up, so it
+	-- stays out of the denominator. The card and the progress tab must agree on the size of the pool.
+	local pool, kind, quests = {}, {}, 0
+	local function addSlots(t, shared)
+		for itemID, chance in pairs(t) do
+			local k = kind[itemID]
+			if not k then
+				if chance < 0 then
+					kind[itemID] = "quest"
+					quests = quests + 1
+				else
+					kind[itemID] = "pool"
+					pool[#pool + 1] = { id = itemID, chance = chance, shared = shared }
+				end
+			elseif k == "quest" and chance >= 0 then
+				-- the same item is quest-only in one part of the table and a normal drop in another: the
+				-- normal drop wins, or the pool would stay one row short forever
+				kind[itemID] = "pool"
+				quests = quests - 1
+				pool[#pool + 1] = { id = itemID, chance = chance, shared = shared }
+			end
 		end
 	end
-	for itemID, chance in pairs(sharedSeed) do
-		if not seen[itemID] then
-			seen[itemID] = true
-			pool[#pool + 1] = { id = itemID, chance = chance, shared = true }
-		end
-	end
-	table.sort(pool, function(a, b) return math.abs(a.chance) > math.abs(b.chance) end)
+	addSlots(ownSeed, false)
+	addSlots(sharedSeed, true)
+	table.sort(pool, function(a, b) return a.chance > b.chance end)
 	local inPool = 0
 	for k = 1, #pool do
 		if got[pool[k].id] then inPool = inPool + 1 end
 	end
 	i = i + 1
-	section(i, ("DROPS · %d/%s %s"):format(inPool, n and tostring(n) or tostring(#pool), ns.T("descubiertos")), C.green)
+	section(i, ("DROPS · %d/%d %s"):format(inPool, #pool, ns.T("descubiertos")), C.green)
 	if #pool > 0 then
 		for k = 1, #pool do
 			local slot = pool[k]
@@ -609,15 +622,21 @@ local function renderCard(id)
 		-- anything looted that the pool does not know about (Forever-only items) is shown too
 		local extra = {}
 		for itemID, rec in pairs(got) do
-			if not seen[itemID] then extra[#extra + 1] = { id = itemID, rec = rec } end
+			if kind[itemID] ~= "pool" then
+				extra[#extra + 1] = { id = itemID, rec = rec, quest = (kind[itemID] == "quest") }
+			end
 		end
 		for k = 1, #extra do
 			local rr = rowColored(i + k, itemIcon(extra[k].id),
 				(extra[k].rec.name or itemName(extra[k].id)):sub(1, 40), S.qualityColor(extra[k].id),
-				ns.T("sin dato 1.12"), nil)
+				ns.T(extra[k].quest and "condicional de quest" or "sin dato 1.12"), nil)
 			attachItem(rr, extra[k].id)
 		end
 		i = i + #extra
+		if quests > 0 then
+			i = i + 1
+			row(i, nil, ("%d %s"):format(quests, ns.T("condicionales de quest")), C.dim)
+		end
 	elseif next(got) then
 		-- the creature dropped things but the base has no pool for it
 		local extra = {}
@@ -650,10 +669,19 @@ function UI.Show(id)
 	if not frame then
 		local okC, errC = pcall(UI.Create)
 		if not okC or not frame then
+			-- a half-built window is worse than no window: drop it so the next attempt rebuilds clean
+			frame, rows = nil, nil
 			print("|cffff4040GarchaDex|r no pude crear la ventana: " .. ns.tostringSafe(errC))
 			return false
 		end
 	end
+	if type(rows) ~= "table" then
+		-- the frame survived a failed build (or an old one from before this code existed)
+		frame = nil
+		return UI.Show(id)
+	end
+	-- showing a card always means leaving the progress tab: the index click has to land on the card
+	UI.SetTab("card")
 	local ok, err = pcall(renderCard, id)
 	if not ok then
 		print("|cffff4040GarchaDex|r error armando la ficha: " .. ns.tostringSafe(err))
@@ -672,6 +700,102 @@ function UI.CycleModel(dir)
 	renderCard(currentID)
 end
 
+-- ---------------------------------------------------------------- progress: how complete is the dex
+
+local function countSeed()
+	if seedTotal then return seedTotal end
+	seedTotal = 0
+	if type(ns.npc) == "table" then
+		for _ in pairs(ns.npc) do seedTotal = seedTotal + 1 end
+	end
+	return seedTotal
+end
+
+-- A and B from the plan, and nothing else. Three rules keep the numbers honest: a quest-conditional
+-- row (negative chance) never rolls without its quest, so it is out of the denominator; a drop the
+-- reference does not list is counted as "outside" instead of inflating the score; and a creature with
+-- no pool at all cannot belong to either number, so it is reported instead of silently skipped.
+local function progressStats()
+	local seen = (ns.DB() and ns.DB().seen) or {}
+	local found, withRef, complete, noRef = 0, 0, 0, 0
+	local poolRows, hitRows, outside = 0, 0, 0
+	for id, e in pairs(seen) do
+		found = found + 1
+		local own, shared = ns.ParseLoot(ns.SeedLoot(id))
+		local pool = {}
+		local function addAll(t)
+			for itemID, chance in pairs(t) do
+				if chance >= 0 then pool[itemID] = true end
+			end
+		end
+		addAll(own)
+		addAll(shared)
+		local n, hit, miss = 0, 0, 0
+		for _ in pairs(pool) do n = n + 1 end
+		for key in pairs((e and e.drops) or {}) do
+			if pool[tonumber(key)] then hit = hit + 1 else miss = miss + 1 end
+		end
+		outside = outside + miss
+		if n > 0 then
+			withRef = withRef + 1
+			poolRows = poolRows + n
+			hitRows = hitRows + hit
+			if hit >= n then complete = complete + 1 end
+		else
+			noRef = noRef + 1
+		end
+	end
+	return {
+		found = found, total = countSeed(), poolRows = poolRows, hitRows = hitRows,
+		complete = complete, withRef = withRef, noRef = noRef, outside = outside,
+	}
+end
+
+function UI.RefreshProgress()
+	if not frame then return end
+	local s = progressStats()
+	local function pct(a, b) return (b > 0) and (a / b * 100) or 0 end
+	if frame.barBestiary then
+		frame.barBestiary:SetMinMaxValues(0, math.max(1, s.total))
+		frame.barBestiary:SetValue(s.found)
+		frame.barBestiary.text:SetText(("%d / %d · %.1f%%"):format(s.found, s.total, pct(s.found, s.total)))
+	end
+	if frame.barDrops then
+		frame.barDrops:SetMinMaxValues(0, math.max(1, s.poolRows))
+		frame.barDrops:SetValue(s.hitRows)
+		frame.barDrops.text:SetText(("%d / %d · %.1f%%"):format(s.hitRows, s.poolRows, pct(s.hitRows, s.poolRows)))
+	end
+	if frame.progNotes then
+		local lines = {
+			{ "entradas completas", ("%d / %d"):format(s.complete, s.withRef) },
+			{ "enemigos sin referencia", tostring(s.noRef) },
+			{ "drops fuera de la referencia", tostring(s.outside) },
+		}
+		for k = 1, #lines do
+			if frame.progNotes[k] then
+				frame.progNotes[k].label:SetText(ns.T(lines[k][1]))
+				frame.progNotes[k].value:SetText(lines[k][2])
+			end
+		end
+	end
+end
+
+function UI.SetTab(name)
+	uiTab = (name == "progress") and "progress" or "card"
+	if not frame then return uiTab end
+	local prog = (uiTab == "progress")
+	if frame.head then frame.head:SetShown(not prog) end
+	if body then body:SetShown(not prog) end
+	if frame.progressPane then frame.progressPane:SetShown(prog) end
+	if frame.tabCard then frame.tabCard.underline:SetShown(not prog) end
+	if frame.tabProgress then frame.tabProgress.underline:SetShown(prog) end
+	if prog then
+		if listFilter then listFilter:ClearFocus() end
+		UI.RefreshProgress()
+	end
+	return uiTab
+end
+
 -- the toolbar's Index button: same window, the list is what matters
 function UI.ShowIndex()
 	UI.Show()
@@ -687,6 +811,24 @@ function UI.Create()
 	frame.title:SetText("|cff3fd15aGarchaDex|r |cff808080v" .. tostring(ns.VERSION) .. "|r")
 	frame.title:ClearAllPoints()
 	frame.title:SetPoint("CENTER", frame.head, "CENTER", 0, 0)
+
+	-- the two tabs live in the window's title strip, so neither pane loses a pixel of height.
+	-- NOTE: S.Panel's `head` is a *texture*, not a frame: it can be an anchor, never a parent.
+	local titleBar = frame.head
+	local function tabButton(label, x, name)
+		local b = S.Button(frame, ns.T(label), 88, 18, nil, function() UI.SetTab(name) end)
+		b:SetPoint("TOPLEFT", titleBar, "TOPLEFT", x, -4)
+		-- the active tab is marked with the same gold hairline the section headers use
+		local line = S.tex(b, C.accent[1], C.accent[2], C.accent[3], 1, "OVERLAY")
+		line:SetHeight(2)
+		line:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 3, -3)
+		line:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -3, -3)
+		line:Hide()
+		b.underline = line
+		return b
+	end
+	frame.tabCard = tabButton("ficha", 10, "card")
+	frame.tabProgress = tabButton("progreso", 102, "progress")
 
 	-- left pane: the index
 	local listPane = CreateFrame("Frame", nil, frame)
@@ -887,6 +1029,53 @@ function UI.Create()
 	body = S.ScrollArea(pane, 0, -120, PANE_W, PANE_H - 120)
 	frame.body = body
 	rows = {}
+
+	-- ---------------------------------------------------------------- the progress pane
+	-- The bars are the game's own level bar: dark well, the client's gradient texture, value written on
+	-- top. A StatusBar with SetValue is what makes it read as an xp bar; a texture driven by width reads
+	-- as a coloured rectangle.
+	local prog = CreateFrame("Frame", nil, pane)
+	prog:SetPoint("TOPLEFT", 0, 0)
+	prog:SetSize(PANE_W, PANE_H)
+	prog:Hide()
+	frame.progressPane = prog
+	local function xpBar(y, label)
+		local t = prog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		t:SetPoint("TOPLEFT", 4, y)
+		t:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
+		t:SetText(ns.T(label))
+		local bar = CreateFrame("StatusBar", nil, prog)
+		bar:SetPoint("TOPLEFT", 4, y - 18)
+		bar:SetSize(PANE_W - 8, 16)
+		bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+		bar:SetMinMaxValues(0, 1)
+		bar:SetValue(0)
+		local bg = bar:CreateTexture(nil, "BACKGROUND")
+		bg:SetAllPoints(bar)
+		bg:SetTexture(0, 0, 0, 0.85)
+		S.Border(bar, C.border)
+		local txt = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		txt:SetPoint("CENTER", 0, 0)
+		bar.text = txt
+		return bar
+	end
+	frame.barBestiary = xpBar(-6, "bestiario")
+	frame.barDrops = xpBar(-50, "drops de tus enemigos")
+	-- the three numbers that keep the percentages honest, in the grey the card already uses
+	local sep = S.tex(prog, C.border[1], C.border[2], C.border[3], 0.8, "ARTWORK")
+	sep:SetHeight(1)
+	sep:SetPoint("TOPLEFT", 4, -96)
+	sep:SetPoint("TOPRIGHT", -4, -96)
+	frame.progNotes = {}
+	for k = 1, 3 do
+		local l = prog:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		l:SetPoint("TOPLEFT", 6, -(104 + (k - 1) * 18))
+		l:SetTextColor(C.grey[1], C.grey[2], C.grey[3])
+		local v = prog:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		v:SetPoint("TOPRIGHT", -8, -(104 + (k - 1) * 18))
+		v:SetTextColor(C.white[1], C.white[2], C.white[3])
+		frame.progNotes[k] = { label = l, value = v }
+	end
 
 	frame.footer = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	frame.footer:SetPoint("BOTTOMLEFT", 14, 8)

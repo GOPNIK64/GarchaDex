@@ -32,16 +32,20 @@ records which character saw what.
 | `/gdx` | card for your current target |
 | `/gdx <npcID>` | card for an id |
 | `/gdx text` | the full card as text in chat |
+| `/gdx progreso` | how complete the dex is, opens the progress tab |
 | `/gdx stats` | counters |
+| `/gdx news` | the discovery log |
 | `/gdx loot` | the last loot events, raw (diagnostic) |
 | `/gdx seed` | seed status and accessors |
 | `/gdx art` | art audit: which atlases and texture paths this client actually has |
+| `/gdx widget` | show the floating widget again |
 | `/gdx lang es\|en\|auto` | language of the addon's own text |
 | `/gdx wipe` / `/gdx wipe all` | clear measurements |
-| `/gdxwin` | open the card window |
 
-There is also a floating toolbar (one button per tool, draggable, right click hides it,
-`/gdx bar` brings it back).
+The window has two tabs: **Ficha** (one creature: what it casts and its drop pool) and
+**Progreso** (two level-style bars, bestiary and drops, plus the numbers behind them). The
+whole UI cost on screen is one floating widget: a small book icon, draggable, right click
+hides it, `/gdx widget` brings it back.
 
 ## Repository layout
 
