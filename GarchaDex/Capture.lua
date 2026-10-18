@@ -13,7 +13,15 @@
 local addonName, ns = ...
 
 local watching                 -- the mob we are currently fighting: { id, credited }
-local lastKilled               -- the last mob we credited a kill to: { id, at }
+local lastKilled               -- the last mob we credited a kill to: { id, at, name, level }
+-- The last creature the cursor was over. This is the key to naming group loot: by the time
+-- LOOT_OPENED fires, the cursor is already on the loot panel, so mouseover/npc/target are all empty.
+-- The corpse you right-clicked a second ago is still here, with its name and level.
+local lastMouseover             -- the last creature the cursor touched: { id, name, level, at }
+local mouseoverHistory = {}     -- the last few, newest last: the loot matches by id, else by recency
+local mouseoverEvents = 0       -- how many times the cursor event fired: tells "no memory" from "no event"
+local enrichFromLive           -- forward declaration: onLootClosed (below) needs it, and a local
+                               -- declared further down is an invisible nil global inside that closure
 local lootWindow               -- { id, isObject, moneyBefore }
 local lastCast                 -- { name, icon } secret values, for the render test
 local MAX_SPELL_LOG = 12
@@ -57,6 +65,65 @@ function ns.UnitIdentity(token)
 	return tostring(cid), name, level, ctype, class, canAttack, reaction
 end
 
+-- Only plain strings are usable: comparing, hashing or measuring a secret value throws, and the client
+-- returns secrets for names and GUIDs of these creatures.
+local function plainString(v)
+	if v == nil then return nil end
+	if isSecret(v) then return nil end
+	if type(v) ~= "string" then return nil end
+	if #v == 0 then return nil end
+	return v
+end
+ns.plainString = plainString
+
+-- GameTooltip holds what the client refuses to hand over: the name on the first line and "Level N"
+-- on the second. Reading a tooltip gives plain text, so this survives a secret name — which is what
+-- these custom creatures return from UnitName.
+local function tooltipUnit(token, needName, needLevel)
+	if not GameTooltip or type(GameTooltip.SetUnit) ~= "function" then return nil, nil end
+	local ok = pcall(function()
+		GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+		GameTooltip:SetUnit(token)
+	end)
+	if not ok then return nil, nil end
+	local function line(n)
+		local fs = _G["GameTooltipTextLeft" .. n]
+		return (fs and fs.GetText) and fs:GetText() or nil
+	end
+	local name, level
+	if needName then
+		name = plainString(line(1))
+	end
+	if needLevel then
+		local second = line(2)
+		local digits = second and second:match("(%d+)")
+		level = digits and tonumber(digits) or nil
+	end
+	pcall(function() GameTooltip:Hide() end)
+	return name, level
+end
+ns.tooltipUnit = tooltipUnit
+
+-- Identity with this client's two fallbacks: a name or level that comes back secret is read off the
+-- tooltip instead. Use this everywhere a live unit is read; UnitIdentity alone loses custom creatures.
+function ns.UnitIdentityRich(token)
+	local id, name, level, ctype, class, canAttack, reaction = ns.UnitIdentity(token)
+	if not id then return nil end
+	if not name or not level then
+		-- the tooltip first: it is what the client draws, so the text is there
+		local tName, tLevel = tooltipUnit(token, not name, not level)
+		name = name or tName
+		level = level or tLevel
+	end
+	if not name and type(GetUnitName) == "function" then
+		-- last resort: GetUnitName has its own path to the name and sometimes answers when UnitName
+		-- refuses (it takes the same token plus a "show realm" flag)
+		local ok, v = pcall(GetUnitName, token, false)
+		if ok and type(v) == "string" and v ~= "" and not isSecret(v) then name = v end
+	end
+	return id, name, level, ctype, class, canAttack, reaction
+end
+
 -- ------------------------------------------------------------------ kills (no combat log: watch the target)
 
 local function credit(reason)
@@ -68,7 +135,10 @@ local function credit(reason)
 	local first = (e.kills or 0) == 0
 	e.kills = (e.kills or 0) + 1
 	e.lastKill = time and time() or nil
-	lastKilled = { id = watching.id, at = (GetTime and GetTime()) or 0 }
+	lastKilled = {
+		id = watching.id, at = (GetTime and GetTime()) or 0,
+		name = watching.name, level = watching.level,
+	}
 	local ck = ns.CharKey()
 	local c = ns.DB().chars[ck]
 	if c then c.kills = (c.kills or 0) + 1 end
@@ -95,12 +165,12 @@ end
 
 function ns.PollTarget()
 	if not ns.IsInCombat() then return end
-	local id, name, level, ctype, class, canAttack, reaction = ns.UnitIdentity("target")
+	local id, name, level, ctype, class, canAttack, reaction = ns.UnitIdentityRich("target")
 	local ok, dead = pcall(UnitIsDead, "target")
 	dead = ok and dead == true
 	if id and not dead and canAttack ~= false then
 		if not watching then
-			watching = { id = id }
+			watching = { id = id, name = name, level = level, ctype = ctype, classification = class }
 			ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class, hostile = canAttack, reaction = reaction })
 		elseif watching.id ~= id then
 			credit("switched target")
@@ -238,6 +308,30 @@ local function onLootOpened()
 			lootWindow.id, lootWindow.fallback = fid, true
 		end
 	end
+	-- 4. name it NOW: the loot source hands over an id and nothing else, and by LOOT_CLOSED the body
+	-- is often already gone. Here the corpse is still under the cursor that clicked it.
+	if lootWindow.id and not lootWindow.isObject then
+		local ok, why = enrichFromLive(lootWindow.id, lootWindow.rawSource)
+		lootWindow.enriched = ok
+		if not ok then
+			-- a corpse you opened is a sighting even when the client refuses to name it, or the card
+			-- reads "seen 0 · looted 7" and looks broken
+			local e = ns.Entry(lootWindow.id)
+			if e and not e.name then
+				e.seen = (e.seen or 0) + 1
+				e.lastSeen = time and time() or nil
+			end
+		end
+		if ns.Trace then
+			local what
+			if ok then
+				what = ns.T("nombrado por") .. " " .. ns.T(tostring(why))
+			else
+				what = ns.T("sin nombre") .. " (" .. ns.T(tostring(why)) .. ")"
+			end
+			ns.Trace(ns.T("looteo") .. " " .. tostring(lootWindow.id) .. " · " .. what .. " · " .. ns.EnrichDebug())
+		end
+	end
 end
 
 local function onLootClosed()
@@ -256,6 +350,8 @@ local function onLootClosed()
 			s.id == nil and (", link=" .. (s.link or "NO")) or "")
 	end
 	local e = lootWindow.id and ns.Entry(lootWindow.id)
+	-- born from a corpse and nothing else: try to name it while the loot window is still open
+	if e and not e.name then enrichFromLive(lootWindow.id) end
 	local method = lootWindow.fallback and "fallback-ultimo-kill" or (lootWindow.isObject and "objeto/nodo" or "source-guid")
 	-- one line per loot event, kept in the saved variables: this is what /gdx loot prints
 	db.meta.lootLog = db.meta.lootLog or {}
@@ -419,7 +515,7 @@ local H = {}
 
 function H.PLAYER_TARGET_CHANGED()
 	if ns.IsInCombat() then ns.PollTarget() else
-		local id, name, level, ctype, class, canAttack, reaction = ns.UnitIdentity("target")
+		local id, name, level, ctype, class, canAttack, reaction = ns.UnitIdentityRich("target")
 		-- the dex is a bestiary: a creature nobody can attack (a vendor, a guard, a quest npc) is
 		-- not an entry, it is scenery. Only untrackable-when-explicitly-friendly.
 		if id and canAttack ~= false then
@@ -428,7 +524,109 @@ function H.PLAYER_TARGET_CHANGED()
 	end
 end
 
-function H.LOOT_OPENED()
+-- Remember every creature the cursor touches. Looting is done by right-clicking the corpse, so a
+-- moment before LOOT_OPENED this fires with the corpse itself: that is where the name and level of a
+-- group kill come from, since by the time the loot panel is up there is no unit under the cursor.
+function H.UPDATE_MOUSEOVER_UNIT()
+	mouseoverEvents = mouseoverEvents + 1
+	-- No GUID and no creature id: both come back secret for these custom creatures, and comparing a
+	-- secret throws. So this keeps a short history of *what* was under the cursor and matches the loot
+	-- by id when one is readable, or simply by "the last creature the cursor touched" when it is not.
+	local name = plainString(select(2, pcall(UnitName, "mouseover")))
+	local o2, v2 = pcall(UnitLevel, "mouseover")
+	local level = (o2 and type(v2) == "number" and not isSecret(v2) and v2 > 0) and v2 or nil
+	if not name or not level then
+		local tName, tLevel = tooltipUnit("mouseover", not name, not level)
+		name = name or tName
+		level = level or tLevel
+	end
+	if not name then return end
+	local id = ns.UnitIdentity("mouseover")
+	lastMouseover = { id = id, name = name, level = level, at = (GetTime and GetTime()) or 0 }
+	mouseoverHistory[#mouseoverHistory + 1] = lastMouseover
+	while #mouseoverHistory > 6 do table.remove(mouseoverHistory, 1) end
+end
+
+-- A creature can enter the dex with nothing but its id: in a group you loot corpses of mobs that were
+-- never your target, so the loot source gives the id and no name, level or type. The corpse under the
+-- cursor is the one chance to name it — mouseover first (that is the corpse you are looting), then the
+-- current target. Bumping seen here is honest: you are looking at it.
+function enrichFromLive(id, sourceGUID)
+	local want = tostring(id)
+	local e = ns.Entry(id)
+	if not e then return false, "sin entrada" end
+
+	local function apply(name, level, ctype, class, source)
+		if not name then return false end
+		ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class })
+		e.enrichedFrom = source
+		return true, source
+	end
+
+	local tried = {}
+	-- 0. the offline name table first: no unit, no cursor, no client cooperation needed. This is the
+	-- path that should carry almost every custom creature.
+	local tName, tLevel, tType = ns.NameFromTable(want)
+	if apply(tName, tLevel, tType, nil, "tabla") then return true, "tabla" end
+	-- 1. a live unit: the corpse under the cursor, the one we interact with, or the target
+	for _, token in ipairs({ "mouseover", "npc", "target" }) do
+		local ok, exists = pcall(UnitExists, token)
+		if ok and exists then
+			local uid, name, level, ctype, class = ns.UnitIdentityRich(token)
+			if uid then
+				tried[#tried + 1] = token .. "=" .. tostring(uid)
+				if uid == want then
+					if apply(name, level, ctype, class, token) then return true, token end
+				end
+			end
+		end
+	end
+
+	local now = (GetTime and GetTime()) or 0
+	-- 2. the cursor memory. No GUID is involved (it is secret and cannot be compared): the newest
+	-- recent entry wins, and any recent entry whose readable id matches the loot id wins over it.
+	local pick, how
+	for k = #mouseoverHistory, 1, -1 do
+		local h = mouseoverHistory[k]
+		if (now - (h.at or 0)) <= 20 then
+			if h.id and h.id == want then
+				pick, how = h, "memoria del cursor"
+				break
+			end
+			if not pick then pick, how = h, "memoria reciente" end
+		end
+	end
+	if pick then
+		if apply(pick.name, pick.level, nil, nil, how) then return true, how end
+		tried[#tried + 1] = "memoria sin nombre"
+	else
+		tried[#tried + 1] = "sin memoria"
+	end
+	-- 3. the last mob this character killed, if it is the same one
+	if lastKilled and lastKilled.id == want and (now - (lastKilled.at or 0)) <= 30 then
+		if apply(lastKilled.name, lastKilled.level, nil, nil, "ultima kill") then return true, "ultima kill" end
+	end
+
+	e.enrichTried = (e.enrichTried or 0) + 1
+	e.enrichLast = table.concat(tried, " ")
+	return false, (e.enrichLast ~= "" and e.enrichLast) or "sin unidad"
+end
+ns.EnrichFromLive = enrichFromLive
+
+-- What the naming machinery has actually seen, for the trace line and the diagnostic window.
+-- Composed label by label: a format string with % cannot travel through the phrase table.
+function ns.EnrichDebug()
+	local parts = { ns.T("cursor") .. ": " .. (mouseoverEvents or 0) .. " " .. ns.T("eventos") }
+	local h = mouseoverHistory[#mouseoverHistory]
+	if h then
+		parts[#parts + 1] = ns.T("ultimo") .. " " .. tostring(h.name) .. " (" .. tostring(h.level or "?") .. ")"
+	else
+		parts[#parts + 1] = ns.T("sin memoria")
+	end
+	return table.concat(parts, " · ")
+end
+
+function H.LOOT_OPENED(self, ...)
 	local ok, err = pcall(onLootOpened)
 	if not ok and ns.ReportError then ns.ReportError("loot/opened", err) end
 end
@@ -479,13 +677,13 @@ function ns.RegisterCapture(container)
 	for ev in pairs(CAST_EVENTS) do
 		pcall(function() container:RegisterUnitEvent(ev, "target") end)
 	end
-	for _, ev in ipairs({ "PLAYER_TARGET_CHANGED", "LOOT_OPENED", "LOOT_CLOSED", "BOSS_KILL", "ENCOUNTER_START", "PLAYER_DEAD" }) do
+	for _, ev in ipairs({ "PLAYER_TARGET_CHANGED", "UPDATE_MOUSEOVER_UNIT", "LOOT_OPENED", "LOOT_CLOSED", "BOSS_KILL", "ENCOUNTER_START", "PLAYER_DEAD" }) do
 		pcall(function() container:RegisterEvent(ev) end)
 	end
 	-- Every handler in this file has to be dispatched explicitly: registering an event on the
 	-- frame does nothing by itself (that was the bug that kept lobbing loot on the floor), and
 	-- the frame's own OnEvent belongs to Core.
-	for _, h in ipairs({ "PLAYER_TARGET_CHANGED", "LOOT_OPENED", "LOOT_CLOSED", "BOSS_KILL", "ENCOUNTER_START", "PLAYER_DEAD" }) do
+	for _, h in ipairs({ "PLAYER_TARGET_CHANGED", "UPDATE_MOUSEOVER_UNIT", "LOOT_OPENED", "LOOT_CLOSED", "BOSS_KILL", "ENCOUNTER_START", "PLAYER_DEAD" }) do
 		local fn = H[h]
 		if fn then
 			container:HookScript("OnEvent", function(_, event, ...)

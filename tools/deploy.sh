@@ -29,8 +29,18 @@ for src in "$REPO_DIR"/*/; do
   if [ ! -f "$src$name.toc" ]; then
     continue
   fi
+  # the updater's stamp is machine state, not part of a release: keep it across a deploy
+  stamp=""
+  if [ -f "$ADDONS/$name/data/gdx_latest.lua" ] && grep -q 'ns.LATEST = "' "$ADDONS/$name/data/gdx_latest.lua"; then
+    stamp="$(mktemp)"
+    cp "$ADDONS/$name/data/gdx_latest.lua" "$stamp"
+  fi
   rm -rf "$ADDONS/$name"
   cp -R "$src" "$ADDONS/$name"
+  if [ -n "$stamp" ]; then
+    cp "$stamp" "$ADDONS/$name/data/gdx_latest.lua"
+    rm -f "$stamp"
+  fi
   echo "deployed $name -> $ADDONS/$name"
 done
 

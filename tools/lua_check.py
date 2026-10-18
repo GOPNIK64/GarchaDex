@@ -62,6 +62,14 @@ def check(path: str) -> list[str]:
     code = strip_noise(src)
     problems: list[str] = []
 
+    # 0. a string literal left open at the end of a line: the file will not compile at all, and a
+    #    generator that wraps a long name across lines produces exactly this. Each line must carry an
+    #    even number of unescaped quotes (long strings and comments already stripped by strip_noise).
+    for no, raw_line in enumerate(src.split("\n"), start=1):
+        quotes = len(re.findall(r'(?<!\\)"', raw_line))
+        if quotes % 2:
+            problems.append(f"line {no}: unterminated string literal (odd number of quotes) -> {raw_line.strip()[:60]}")
+
     # 1. forbidden / non-5.1 syntax
     for pat, msg in (
         (r"(?<![\w:])goto\s+\w+", "goto is not available in WoW's Lua 5.1"),

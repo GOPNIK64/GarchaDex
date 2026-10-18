@@ -270,6 +270,37 @@ function ns.PrintStats()
 	say(("de esos, atribuidos por ultimo-kill (fallback): %d"):format(fb))
 end
 
+-- Which entries are still nameless and why: the loot source only gives an id, so the name has to come
+-- from the unit under the cursor at loot time. This prints what that attempt actually saw.
+-- Labels are translated one by one and the numbers are concatenated in Lua: a format string with %d
+-- must never travel through the phrase table (see the note in ns.T).
+function ns.PrintEnrich()
+	local db = ns.DB()
+	local rows = {}
+	for id, e in pairs(db.seen) do
+		if (e.lootWindows or 0) > 0 and not e.name then rows[#rows + 1] = { id = id, e = e } end
+	end
+	table.sort(rows, function(a, b) return (tonumber(a.id) or 0) < (tonumber(b.id) or 0) end)
+	local function kv(label, value) return ns.T(label) .. " " .. tostring(value) end
+	local lines = { ns.T("entradas sin nombre con loot:") .. " " .. #rows }
+	if ns.EnrichDebug then lines[#lines + 1] = ns.EnrichDebug() end
+	for k = 1, math.min(#rows, 40) do
+		local e = rows[k].e
+		lines[#lines + 1] = "id " .. tostring(rows[k].id) .. " · " ..
+			kv("looteos:", e.lootWindows or 0) .. " · " ..
+			kv("visto:", e.seen or 0) .. " · " ..
+			kv("nombrada por:", e.enrichedFrom or "-") .. " · " ..
+			kv("ultimo intento:", "[" .. tostring(e.enrichLast or "-") .. "]")
+	end
+	local text = table.concat(lines, "\n")
+	-- a selectable window instead of chat spam: this is meant to be copied and pasted
+	if ns.UI and ns.UI.ShowText then
+		ns.UI.ShowText("GarchaDex", text)
+	else
+		say(text)
+	end
+end
+
 -- prints the last loot events, which is the only reliable way to see why a corpse was or
 -- was not attributed (source string, method, money, items with their resolved id)
 function ns.PrintLoot()
@@ -363,6 +394,10 @@ SlashCmdList["GARCHADEX"] = function(msg)
 			ns.UI.Show()
 			ns.UI.SetTab("progress")
 		end
+	elseif msg == "enrich" then
+		ns.PrintEnrich()
+	elseif msg == "trace" then
+		ns.SetTrace(not ns.TraceOn())
 	elseif msg == "test" then
 		renderSecretTest()
 	elseif msg:match("^%d+$") then
@@ -430,6 +465,8 @@ SlashCmdList["GARCHADEX"] = function(msg)
 		print("  |cffffff00/gdx widget|r |cff808080" .. ns.T("mostrar el widget en pantalla") .. "|r")
 		print("  |cffffff00/gdx stats|r |cff808080" .. ns.T("contadores generales") .. "|r")
 		print("  |cffffff00/gdx progreso|r |cff808080" .. ns.T("cuanto del bestiario llevas") .. "|r")
+		print("  |cffffff00/gdx enrich|r |cff808080" .. ns.T("entradas sin nombre y por que") .. "|r")
+		print("  |cffffff00/gdx trace|r |cff808080" .. ns.T("avisos de captura en el chat, on/off") .. "|r")
 		print("  |cffffff00/gdx seed|r |cff808080" .. ns.T("estado del seed y chequeo crudo") .. "|r")
 		print("  |cffffff00/gdx loot|r |cff808080" .. ns.T("ultimos looteos vistos") .. "|r")
 		print("  |cffffff00/gdx art|r |cff808080" .. ns.T("auditoria de arte del cliente") .. "|r")

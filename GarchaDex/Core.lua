@@ -8,7 +8,7 @@
 
 local addonName, ns = ...
 
-ns.VERSION = "0.10.1"
+ns.VERSION = "0.11.4"
 ns.DB_VERSION = 1
 ns.BOSS_KILL_WINDOW = 5
 
@@ -80,6 +80,55 @@ end
 
 -- ------------------------------------------------------------------ entry access
 
+-- ------------------------------------------------------------------ offline names (data/gdx_names.lua)
+-- The client refuses to name some custom creatures (UnitName returns a secret), so a corpse can leave
+-- an entry with nothing but an id. This table, recorded in the beta by warcraftforever.games with the
+-- ForeverLog addon, fills that hole as a LAST resort: what the client says always wins.
+
+function ns.NameFromTable(id)
+	local row = ns.names and ns.names[tonumber(id)]
+	if type(row) ~= "string" then return nil end
+	-- plain find/sub splitting: no Lua patterns anywhere, so a stray character in a creature name
+	-- cannot make the whole lookup fail the way a pattern would
+	local parts, from = {}, 1
+	while true do
+		local bar = string.find(row, "|", from, true)
+		if not bar then
+			parts[#parts + 1] = string.sub(row, from)
+			break
+		end
+		parts[#parts + 1] = string.sub(row, from, bar - 1)
+		from = bar + 1
+	end
+	local name = parts[1]
+	if not name or name == "" then return nil end
+	return name, (parts[2] ~= "" and parts[2] or nil), (parts[3] ~= "" and parts[3] or nil)
+end
+
+-- One pass over everything already captured, so the names land at login instead of depending on
+-- looting that creature again (or on the client agreeing to name it). Returns how many it filled.
+function ns.PatchNames()
+	if type(ns.names) ~= "table" then return 0, 0 end
+	local filled, total = 0, 0
+	for id, e in pairs(DB.seen) do
+		total = total + 1
+		if type(e) == "table" and not e.name then
+			local name, level, ctype = ns.NameFromTable(id)
+			if name then
+				e.name = name
+				e.nameFrom = "tabla"
+				if not e.level then
+					local hi = string.match(level or "", "^%d+%-(%d+)$")
+					e.level = tonumber(hi or level or "")
+				end
+				if not e.creatureType and ctype then e.creatureType = ctype end
+				filled = filled + 1
+			end
+		end
+	end
+	return filled, total
+end
+
 function ns.Entry(id)
 	if id == nil then return nil end
 	local key = tostringSafe(id)
@@ -91,6 +140,20 @@ function ns.Entry(id)
 			drops = {}, spells = {}, spellList = {}, chars = {},
 		}
 		DB.seen[key] = e
+	end
+	-- an entry the client could not name: fill it from the offline table, so the index and the card
+	-- never show "npc <id>" when the name is known somewhere
+	if not e.name then
+		local name, level, ctype = ns.NameFromTable(key)
+		if name then
+			e.name = name
+			e.nameFrom = "tabla"
+			if not e.level then
+				local hi = string.match(level or "", "^%d+%-(%d+)$")
+				e.level = tonumber(hi or level or "")
+			end
+			if not e.creatureType and ctype then e.creatureType = ctype end
+		end
 	end
 	return e
 end
@@ -125,6 +188,22 @@ function ns.Touch(id, opts)
 		ns.Discovery.Creature("new_enemy", id, e.zone and ("lo viste por primera vez · " .. e.zone) or "lo viste por primera vez")
 	end
 	return e
+end
+
+-- ------------------------------------------------------------------ version stamp (data/gdx_latest.lua)
+-- The client has no network and the sandbox has no file IO: the addon can never ask GitHub anything.
+-- tools/update.sh does the asking and writes ns.LATEST next to the seed; here we only compare.
+
+local function verNum(v)
+	local a, b, c = tostring(v or ""):match("^(%d+)%.(%d+)%.?(%d*)")
+	return (tonumber(a) or 0) * 10000 + (tonumber(b) or 0) * 100 + (tonumber(c) or 0)
+end
+
+-- nil when there is nothing newer, or when nobody ever checked. Never a network call, never a guess.
+function ns.Outdated()
+	if type(ns.LATEST) ~= "string" or ns.LATEST == "" then return nil end
+	if verNum(ns.LATEST) <= verNum(ns.VERSION) then return nil end
+	return ns.LATEST
 end
 
 -- ------------------------------------------------------------------ seed access (static reference layer)
@@ -168,6 +247,20 @@ end
 
 function ns.IsInCombat() return inCombat end
 function ns.DB() return DB end
+
+-- One chat line per capture decision, on by default: naming a group corpse depends on a chain of
+-- client calls that fail silently, and watching the chat is faster than any diagnostic window.
+-- `/gdx trace off` silences it.
+local traceOn = true
+function ns.Trace(msg)
+	if not traceOn then return end
+	print("|cff3fd15aGarchaDex|r " .. tostringSafe(msg))
+end
+function ns.SetTrace(on)
+	traceOn = on and true or false
+	print("|cff3fd15aGarchaDex|r trace " .. (traceOn and "on" or "off"))
+end
+function ns.TraceOn() return traceOn end
 
 -- A swallowed error is a bug you cannot see. Every capture handler reports through here,
 -- once per distinct message, so a broken path shows up in chat instead of staying invisible.
@@ -223,8 +316,14 @@ function H.PLAYER_LOGIN()
 	end
 	local known = 0
 	for _ in pairs(DB.seen) do known = known + 1 end
-	print(("|cff33ff99GarchaDex|r v%s %s. seed[%s] %s%d. |cffffff00/gdx|r %s")
-		:format(ns.VERSION, ns.T("cargado"), table.concat(counts, " "), ns.T("capturados="), known, ns.T("para ayuda.")))
+	-- names first: the table fills every entry the client never named, in one pass, before anything
+	-- reads them (index, card, toasts)
+	local filled, total = ns.PatchNames()
+	local names = 0
+	if type(ns.names) == "table" then for _ in pairs(ns.names) do names = names + 1 end end
+	print(("|cff33ff99GarchaDex|r v%s %s. seed[%s] nombres=%d %s%d. |cffffff00/gdx|r %s")
+		:format(ns.VERSION, ns.T("cargado"), table.concat(counts, " "), names, ns.T("capturados="), known, ns.T("para ayuda.")))
+	print(("|cff33ff99GarchaDex|r %s %d/%d"):format(ns.T("nombres de la tabla aplicados:"), filled, total))
 	if type(ns.lootn) ~= "table" or type(ns.spell) ~= "table" then
 		print("|cffff4040GarchaDex|r " .. ns.T("el seed NO se cargo: revisá que GarchaDex/data/gdx_seed.lua exista (el .toc lo lista como data\\gdx_seed.lua) y mirá si hubo un error de Lua al iniciar."))
 	end

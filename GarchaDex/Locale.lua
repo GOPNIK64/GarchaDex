@@ -145,6 +145,8 @@ local DICT = {
 	["capturado:"] = "captured:",
 	["DROPS descubiertos"] = "DROPS DISCOVERED",
 	["descubiertos"] = "discovered",
+	["medidos, sin referencia"] = "measured, no reference",
+	["nombres de la tabla aplicados:"] = "names applied from the table:",
 	["cadaveres looteados"] = "corpses looted",
 	["cadaveres"] = "corpses",
 	["sin dato 1.12"] = "no 1.12 data",
@@ -218,6 +220,34 @@ local DICT = {
 	["ficha"] = "card",
 	["progreso"] = "progress",
 	["cuanto del bestiario llevas"] = "how much of the bestiary you have",
+	["hay una version nueva: "] = "a new version is out: ",
+	["entradas sin nombre y por que"] = "nameless entries and why",
+	["entradas sin nombre con loot:"] = "entries with loot and no name:",
+	["looteos:"] = "looted:",
+	["visto:"] = "seen:",
+	["nombrada por:"] = "named by:",
+	["ultimo intento:"] = "last try:",
+	["ultima vez"] = "last seen",
+	["looteo"] = "loot",
+	["nombrado por"] = "named by",
+	["sin nombre"] = "no name",
+	["sin entrada"] = "no entry",
+	["sin unidad"] = "no unit",
+	["memoria del cursor"] = "cursor memory",
+	["ultima kill"] = "last kill",
+	["cursor visto sin nombre"] = "cursor seen, no name",
+	["cursor"] = "cursor",
+	["eventos"] = "events",
+	["ultimo"] = "last",
+	["sin memoria"] = "no memory",
+	["cursor sin nombre"] = "cursor without a name",
+	["memoria por guid"] = "memory by guid",
+	["memoria reciente"] = "recent memory",
+	["memoria sin nombre"] = "memory without a name",
+	["tabla"] = "table",
+	["guid coincide, sin nombre"] = "guid matches, no name",
+	["cursor en otro id "] = "cursor on another id ",
+	["avisos de captura en el chat, on/off"] = "capture notices in chat, on/off",
 	["bestiario"] = "bestiary",
 	["drops de tus enemigos"] = "drops from your enemies",
 	["entradas completas"] = "complete entries",
@@ -299,7 +329,11 @@ function ns.T(s)
 	for i = 1, #ORDER do
 		local from = ORDER[i]
 		if string.find(out, from, 1, true) then
-			out = string.gsub(out, from:gsub("([%%%(%)%.%+%-%*%?%[%]%^%$])", "%%%1"), DICT[from])
+			-- the pattern needs its magic characters escaped, and so does the REPLACEMENT: a '%' in a
+			-- translation ("...: %d") is read by gsub as a capture reference and mangles or breaks the
+			-- text, which is why format strings must never reach gsub unescaped.
+			local to = DICT[from]:gsub("%%", "%%%%")
+			out = string.gsub(out, from:gsub("([%%%(%)%.%+%-%*%?%[%]%^%$])", "%%%1"), to)
 		end
 	end
 	return out

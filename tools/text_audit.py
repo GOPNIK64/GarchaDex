@@ -150,6 +150,18 @@ def main(argv):
     table = load_dict(locale)
     order = sorted(table, key=len, reverse=True)
 
+    # A '%' in the table is a bug by construction: ns.T feeds these strings to string.gsub, where a
+    # '%' in the replacement is a capture reference (it either mangles the text or raises). Format
+    # strings must be composed in Lua instead -- translate the labels, concatenate the numbers. The
+    # simulator below cannot catch this class on its own: it replaces as plain text while the addon
+    # replaced with a pattern, so it would happily translate a table that breaks in game.
+    fmt = [(k, v) for k, v in table.items() if "%" in k or "%" in v]
+    if fmt:
+        print("FAIL: these table entries contain '%' and cannot go through ns.T:")
+        for k, v in fmt:
+            print(f"  {k!r} -> {v!r}")
+        return 1
+
     leaks, untranslated = [], []
     for f in files:
         if f.name == "Locale.lua" or not f.exists():

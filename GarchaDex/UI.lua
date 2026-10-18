@@ -20,7 +20,10 @@ local S = ns.Skin
 local C = S.C
 
 local frame, rows, body
-local listRows, listFilter, listOffset, listCache, listCount
+local listRows, listFilter, listCache, listCount
+-- 0-based row window of the index. It must start at 0: nil here crashed the very first render when
+-- nothing was selected yet, because the clamp at the bottom of rebuildList compares it with a number.
+local listOffset = 0
 -- forward declaration: newListRow's wheel handler calls it, and a local declared further down would
 -- resolve to a nil global inside that closure (the index would simply refuse to scroll)
 local rebuildList
@@ -140,12 +143,16 @@ end
 
 function rebuildList()
 	local seen = ns.DB().seen
+	listOffset = listOffset or 0
 	local filter = string.lower((listFilter and listFilter:GetText()) or "")
 	-- the dex is a bestiary: only creatures you can fight. Entries captured before hostility was
 	-- recorded (no field) are kept, since they came from a target that was attackable then.
 	local list = {}
 	for id, e in pairs(seen) do
 		if e.hostile ~= false then
+			-- Entry() fills the name from the offline table when the client refused to give one, so an
+			-- old entry stops reading "npc 250484" the moment the table knows it
+			e = ns.Entry(id) or e
 			local name = e.name or (ns.npc and ns.npc[id] and string.match(ns.npc[id], "^[^|]+")) or ("npc " .. id)
 			list[#list + 1] = { id = id, name = name, e = e }
 		end
@@ -401,7 +408,7 @@ local function renderCard(id)
 	currentID = id
 	UI.currentID = id
 	if not sameCard then modelIdx = 1 end
-	local e = ns.DB().seen[id]
+	local e = ns.Entry(id)   -- Entry also fills the name from the offline table for creatures the client cannot name
 	local meta = seedMeta(id)
 
 	-- header: name, identity and stats
@@ -421,6 +428,7 @@ local function renderCard(id)
 	if ctype then bits[#bits + 1] = tostring(ctype) end
 	if rank then bits[#bits + 1] = tostring(rank) end
 	if e and e.zone then bits[#bits + 1] = e.zone end
+	if e and e.lastSeen then bits[#bits + 1] = ns.T("ultima vez") .. " " .. date("%d/%m", e.lastSeen) end
 	frame.sub:SetText(ns.T(table.concat(bits, " · ")))
 	frame.chipSeen.value:SetText(tostring(e and e.seen or 0))
 	frame.chipKills.value:SetText(tostring(e and e.kills or 0))
@@ -599,8 +607,16 @@ local function renderCard(id)
 	for k = 1, #pool do
 		if got[pool[k].id] then inPool = inPool + 1 end
 	end
+	local gotN = 0
+	for _ in pairs(got) do gotN = gotN + 1 end
 	i = i + 1
-	section(i, ("DROPS · %d/%d %s"):format(inPool, #pool, ns.T("descubiertos")), C.green)
+	if #pool > 0 then
+		section(i, ("DROPS · %d/%d %s"):format(inPool, #pool, ns.T("descubiertos")), C.green)
+	else
+		-- no reference pool at all: the honest header is how many you measured, not a 0/0 that reads
+		-- like the addon lost your loot
+		section(i, ("DROPS · %d %s"):format(gotN, ns.T("medidos, sin referencia")), C.green)
+	end
 	if #pool > 0 then
 		for k = 1, #pool do
 			local slot = pool[k]
@@ -688,6 +704,11 @@ function UI.Show(id)
 	else
 		frame:Show()
 		rebuildList()
+		-- the updater script may have left a newer version behind: say it once, quietly, in the footer
+		if frame.footer then
+			local newer = ns.Outdated and ns.Outdated()
+			frame.footer:SetText(newer and ("|cffe0b030" .. ns.T("hay una version nueva: ") .. tostring(newer) .. "|r") or "")
+		end
 	end
 	return ok
 end
