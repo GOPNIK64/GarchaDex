@@ -95,7 +95,9 @@ local function tooltipUnit(token, needName, needLevel)
 		name = plainString(line(1))
 	end
 	if needLevel then
-		local second = line(2)
+		-- plainString first: calling a string method on a secret value throws, and the tooltip text of a
+		-- creature whose name is secret can be secret too
+		local second = plainString(line(2))
 		local digits = second and second:match("(%d+)")
 		level = digits and tonumber(digits) or nil
 	end
@@ -615,6 +617,35 @@ ns.EnrichFromLive = enrichFromLive
 
 -- What the naming machinery has actually seen, for the trace line and the diagnostic window.
 -- Composed label by label: a format string with % cannot travel through the phrase table.
+-- What the client actually gives us for the current target. Read-only, one line, so a screenshot of
+-- the chat is enough: levels of the custom Forever creatures are reported as missing by every source
+-- we have, and this is how we tell "the client hides it" from "we ask wrong".
+function ns.LevelProbe()
+	local token = "target"
+	local out = {}
+	local okE, exists = pcall(UnitExists, token)
+	out[#out + 1] = "existe=" .. tostring(okE and exists)
+	local okL, lv = pcall(UnitLevel, token)
+	out[#out + 1] = "UnitLevel=" .. (okL and (isSecret(lv) and "SECRETO" or tostring(lv)) or "error")
+	local okN, nm = pcall(UnitName, token)
+	out[#out + 1] = "UnitName=" .. (okN and (isSecret(nm) and "SECRETO" or tostring(nm)) or "error")
+	pcall(function()
+		GameTooltip:SetOwner(UIParent, "ANCHOR_NONE")
+		GameTooltip:SetUnit(token)
+	end)
+	for k = 1, 3 do
+		local fs = _G["GameTooltipTextLeft" .. k]
+		local txt = "-"
+		if fs and fs.GetText then
+			local okT, t = pcall(fs.GetText, fs)
+			txt = okT and (isSecret(t) and "SECRETO" or tostring(t)) or "error"
+		end
+		out[#out + 1] = "L" .. k .. "=" .. txt
+	end
+	pcall(function() GameTooltip:Hide() end)
+	print("|cff33ff99GarchaDex|r " .. table.concat(out, " · "))
+end
+
 function ns.EnrichDebug()
 	local parts = { ns.T("cursor") .. ": " .. (mouseoverEvents or 0) .. " " .. ns.T("eventos") }
 	local h = mouseoverHistory[#mouseoverHistory]

@@ -95,6 +95,17 @@ local function copper(n)
 	return ("%dc"):format(c)
 end
 
+-- 4046 reads as a wall; 4,046 reads as a number
+local function thousands(n)
+	local out = tostring(math.floor((n or 0) + 0.5))
+	while true do
+		local replaced
+		out, replaced = out:gsub("^(%d+)(%d%d%d)", "%1,%2")
+		if replaced == 0 then break end
+	end
+	return out
+end
+
 -- ------------------------------------------------------------------ left pane: the index of what you found
 
 local function newListRow(i)
@@ -116,11 +127,74 @@ local function newListRow(i)
 	info:SetPoint("TOPLEFT", 5, -16)
 	info:SetJustifyH("LEFT")
 	r.info = info
+	-- Group rows are a bar with the zone name written on it, the way the game draws the XP bar, plus
+	-- the classic red panel button for the +/- toggle (no chevron glyphs: the client font has none).
+	local bar = CreateFrame("StatusBar", nil, r)
+	bar:SetHeight(15)
+	bar:SetPoint("LEFT", 24, 0)
+	bar:SetPoint("RIGHT", r, "RIGHT", -6, 0)
+	bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+	bar:SetStatusBarColor(0.42, 0.31, 0.09)
+	bar:SetMinMaxValues(0, 1)
+	bar:SetValue(0)
+	local barBg = bar:CreateTexture(nil, "BACKGROUND")
+	barBg:SetAllPoints(bar)
+	barBg:SetTexture(0.03, 0.02, 0.01, 1)
+	local barTxt = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	barTxt:SetPoint("CENTER", bar, "CENTER", 0, 0)
+	barTxt:SetJustifyH("CENTER")
+	bar.txt = barTxt
+	S.Border(bar, nil, 1)
+	bar:Hide()
+	r.bar = bar
+	-- The toggle is a real UIPanelButtonTemplate: the template owns the font string, so the glyph is
+	-- centred by the client instead of by my own anchor arithmetic (which is what kept landing it in
+	-- the top-left corner even with CENTER points on a bare FontString).
+	local plus = CreateFrame("Button", "GarchaDexRowToggle" .. i, r, "UIPanelButtonTemplate")
+	plus:SetSize(18, 18)
+	plus:SetPoint("LEFT", 3, 0)
+	plus:SetText("+")
+	local plusTxt = plus:GetFontString()
+	if plusTxt then
+		plusTxt:ClearAllPoints()
+		plusTxt:SetPoint("CENTER", plus, "CENTER", 0, 0)
+		plusTxt:SetJustifyH("CENTER")
+		plusTxt:SetJustifyV("MIDDLE")
+	end
+	plus.txt = plusTxt
+	plus:Hide()
+	plus:SetScript("OnClick", function(self)
+		local zone = self:GetParent().zone
+		if not zone then return end
+		local db = ns.DB()
+		db.meta = db.meta or {}
+		db.meta.collapsed = db.meta.collapsed or {}
+		db.meta.collapsed[zone] = not db.meta.collapsed[zone]
+		listOffset = 0
+		rebuildList()
+	end)
+	r.plus = plus
+	-- the hairline that ties a group's children together: drawn only on child rows
+	local guide = r:CreateTexture(nil, "ARTWORK")
+	guide:SetWidth(1)
+	guide:SetPoint("TOPLEFT", r, "TOPLEFT", -7, 0)
+	guide:SetPoint("BOTTOMLEFT", r, "BOTTOMLEFT", -7, 0)
+	guide:SetColorTexture(0.55, 0.42, 0.16, 0.45)
+	guide:Hide()
+	r.guide = guide
 	r:SetScript("OnClick", function(self)
-		if self.entry then UI.Show(self.entry.id) end
+		if self.kind == "group" then
+			local db = ns.DB()
+			db.meta.collapsed = db.meta.collapsed or {}
+			db.meta.collapsed[self.zone] = not db.meta.collapsed[self.zone]
+			listOffset = 0
+			rebuildList()
+		elseif self.entry then
+			UI.Show(self.entry.id)
+		end
 	end)
 	r:SetScript("OnEnter", function(self)
-		if not self.entry then return end
+		if self.kind ~= "entry" or not self.entry then return end
 		local e = self.entry.e or {}
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 		GameTooltip:AddLine(self.entry.name, C.gold[1], C.gold[2], C.gold[3])
@@ -141,53 +215,201 @@ local function newListRow(i)
 	return r
 end
 
+-- An entry is "complete" when its OWN table is fully discovered. Shared world-drop groups are left
+-- out on purpose: they are huge, shared by hundreds of creatures, and counting them made "complete"
+-- unreachable for every single entry (0/18 was not progress, it was a broken rule).
+local function entryComplete(id, e)
+	local own = ns.ParseLoot(ns.SeedLoot(id))
+	local n, got = 0, 0
+	for itemID, chance in pairs(own) do
+		if chance >= 0 then
+			n = n + 1
+			if e.drops and e.drops[tostring(itemID)] then got = got + 1 end
+		end
+	end
+	if n == 0 then
+		for _ in pairs((e and e.drops) or {}) do return true end
+		return false
+	end
+	return got >= n
+end
+UI.EntryComplete = entryComplete
+
+-- Fuzzy match: the query's characters in order, anywhere in the name, so "dw" finds "Deep Widow" and
+-- "skmage" finds "Skeletal Mage". Returns a score (higher is better) or nil when there is no match.
+local function fuzzyScore(name, query)
+	local low = string.lower(name)
+	local pos, score, streak = 1, 0, 0
+	for k = 1, #query do
+		local ch = string.sub(query, k, k)
+		if ch ~= " " then
+			local found = string.find(low, ch, pos, true)
+			if not found then return nil end
+			if found == pos then
+				streak = streak + 1
+				score = score + 3 + streak * 2
+			else
+				streak = 0
+				score = score + 1
+			end
+			pos = found + 1
+		end
+	end
+	if string.sub(low, 1, #query) == query then score = score + 12 end
+	return score
+end
+
 function rebuildList()
 	local seen = ns.DB().seen
 	listOffset = listOffset or 0
+	local db = ns.DB()
+	db.meta = db.meta or {}
+	db.meta.collapsed = db.meta.collapsed or {}
 	local filter = string.lower((listFilter and listFilter:GetText()) or "")
 	-- the dex is a bestiary: only creatures you can fight. Entries captured before hostility was
 	-- recorded (no field) are kept, since they came from a target that was attackable then.
-	local list = {}
+	local flat = {}
+	local notEnemyIn = {}
 	for id, e in pairs(seen) do
-		if e.hostile ~= false then
+		-- a critter is attackable, so the client says "you can fight it", but a rat is not a bestiary
+		-- entry: it stays in the database, out of the enemy index and out of the area denominators
+		local critter = type(e.creatureType) == "string" and string.lower(e.creatureType) == "critter"
+		-- NPCs you have met and the client called friendly are provably not enemies *for your
+		-- faction*: they are subtracted from the area's denominator, which comes from the site's
+		-- sessions and is faction-blind (a Horde guard counts as hostile there if an Alliance player
+		-- recorded it). Without this, a Horde bar could never reach the end in Horde lands.
+		if e.hostile == false or critter then
+			local area = e.zone or (ns.areaOf and ns.areaOf[tonumber(id)])
+			if area then notEnemyIn[area] = (notEnemyIn[area] or 0) + 1 end
+		end
+		if e.hostile ~= false and not critter then
 			-- Entry() fills the name from the offline table when the client refused to give one, so an
 			-- old entry stops reading "npc 250484" the moment the table knows it
 			e = ns.Entry(id) or e
 			local name = e.name or (ns.npc and ns.npc[id] and string.match(ns.npc[id], "^[^|]+")) or ("npc " .. id)
-			list[#list + 1] = { id = id, name = name, e = e }
-		end
-	end
-	table.sort(list, function(a, b)
-		if (a.e.seen or 0) ~= (b.e.seen or 0) then return (a.e.seen or 0) > (b.e.seen or 0) end
-		return (a.name or "") < (b.name or "")
-	end)
-	if filter ~= "" then
-		local f = {}
-		for _, r in ipairs(list) do
-			if string.find(string.lower(r.name), filter, 1, true) or string.find(tostring(r.id), filter, 1, true) then
-				f[#f + 1] = r
+			local score = 100
+			if filter ~= "" then
+				if string.find(tostring(id), filter, 1, true) then
+					score = 120
+				else
+					score = fuzzyScore(name, filter)
+				end
+			end
+			if score then
+				flat[#flat + 1] = { id = id, name = name, e = e, kind = "entry", score = score }
 			end
 		end
-		list = f
 	end
-	listCache = list
-	listCount = #list
+	-- group by area. A dungeon is its own area and never merges into the zone around it; outside
+	-- instances the area where you met the creature wins over the table, which is only a fallback.
+	local groups, order = {}, {}
+	for _, item in ipairs(flat) do
+		local tableArea = ns.areaOf and ns.areaOf[tonumber(item.id)]
+		local key
+		if tableArea and ns.areaDungeon and ns.areaDungeon[tableArea] then
+			key = tableArea
+		else
+			key = item.e.zone or tableArea or ns.T("sin zona")
+		end
+		if not groups[key] then
+			groups[key] = {}
+			order[#order + 1] = key
+		end
+		local g = groups[key]
+		g[#g + 1] = item
+	end
+	-- instances first, then open zones: the two kinds of area never share a list position by accident
+	table.sort(order, function(a, b)
+		local da = (ns.areaDungeon and ns.areaDungeon[a]) and 0 or 1
+		local db = (ns.areaDungeon and ns.areaDungeon[b]) and 0 or 1
+		if da ~= db then return da < db end
+		return a < b
+	end)
+	local display = {}
+	for _, area in ipairs(order) do
+		local g = groups[area]
+		if filter ~= "" then
+			-- searching ranks by how well the name matches, not by how often you killed it
+			table.sort(g, function(a, b)
+				if a.score ~= b.score then return a.score > b.score end
+				return (a.name or "") < (b.name or "")
+			end)
+		else
+			table.sort(g, function(a, b)
+				if (a.e.seen or 0) ~= (b.e.seen or 0) then return (a.e.seen or 0) > (b.e.seen or 0) end
+				return (a.name or "") < (b.name or "")
+			end)
+		end
+		local done = 0
+		for _, item in ipairs(g) do
+			item.complete = entryComplete(item.id, item.e)
+			if item.complete then done = done + 1 end
+		end
+		-- the denominator is the area's roster, not what you happen to have found: that is the whole
+		-- point of the bar. Areas the table does not describe fall back to what is in the group.
+		local total = (ns.areaTotal and ns.areaTotal[area]) or #g
+		total = total - (notEnemyIn[area] or 0)
+		if total < #g then total = #g end
+		-- a search expands everything: hiding results that match would be hostile
+		local collapsed = (filter == "") and db.meta.collapsed[area] and true or false
+		display[#display + 1] = {
+			kind = "group", zone = area, n = #g, done = done, total = total, collapsed = collapsed,
+		}
+		if not collapsed then
+			for _, item in ipairs(g) do display[#display + 1] = item end
+		end
+	end
+	listCache = display
+	listCount = #display
 	if listOffset > math.max(0, listCount - LIST_ROWS) then
 		listOffset = math.max(0, listCount - LIST_ROWS)
 	end
 	for i = 1, LIST_ROWS do
-		local row, item = listRows[i], list[listOffset + i]
-		if item then
-			row:Show()
-			row.entry = item
-			row.sel:SetShown(currentID == tostring(item.id))
-			row.name:SetText("|cffffd200" .. item.name:sub(1, 24) .. "|r")
-			local e = item.e or {}
-			row.info:SetText(("|cff90806a id %s · lvl %s · %s %d|r"):format(
-				item.id, tostring(e.level or "?"), ns.T("visto"), e.seen or 0))
-		else
+		local row, item = listRows[i], display[listOffset + i]
+		if not item then
 			row:Hide()
-			row.entry = nil
+			row.entry, row.kind = nil, nil
+		else
+			row:Show()
+			row.kind = item.kind
+			if item.kind == "group" then
+				row.entry = nil
+				row.zone = item.zone
+				row.sel:Hide()
+				row.name:Hide()
+				row.info:Hide()
+				row.guide:Hide()
+				row:SetPoint("TOPLEFT", frame.listPane, "TOPLEFT", 6, -(i - 1) * LIST_ROW_H - 28)
+				local frac = (item.total > 0) and (item.n / item.total) or 0
+				row.bar:Show()
+				-- instances read red, open zones read gold: a dungeon and the zone it sits in are not
+				-- the same kind of thing and must not look the same
+				if ns.areaDungeon and ns.areaDungeon[item.zone] then
+					row.bar:SetStatusBarColor(0.40, 0.11, 0.10)
+				else
+					row.bar:SetStatusBarColor(0.42, 0.31, 0.09)
+				end
+				row.bar:SetValue(math.min(1, frac))
+				row.bar.txt:SetText(("%s   |cff90806a%d/%d|r"):format(item.zone, item.n, item.total))
+				row.plus:Show()
+				if row.plus.txt then row.plus.txt:SetText(item.collapsed and "+" or "-") end
+			else
+				row.zone = nil
+				row.entry = item
+				row.bar:Hide()
+				row.plus:Hide()
+				row.name:Show()
+				row.info:Show()
+				-- children sit one step in with a hairline on their left, so the nesting reads
+				row:SetPoint("TOPLEFT", frame.listPane, "TOPLEFT", 22, -(i - 1) * LIST_ROW_H - 28)
+				row.guide:Show()
+				row.sel:SetShown(currentID == tostring(item.id))
+				row.name:SetText("|cffffd200" .. item.name:sub(1, 24) .. "|r")
+				local e = item.e or {}
+				local mark = item.complete and "|cff3fd15a+ |r" or ""
+				row.info:SetText(("%s|cff90806a id %s · lvl %s · %s %d|r"):format(
+					mark, item.id, tostring(e.level or "?"), ns.T("visto"), e.seen or 0))
+			end
 		end
 	end
 end
@@ -609,6 +831,17 @@ local function renderCard(id)
 	end
 	local gotN = 0
 	for _ in pairs(got) do gotN = gotN + 1 end
+	-- The addon's own count, for creatures the 1.12 base does not cover. The denominator is real:
+	-- every corpse of this creature that was opened. Under ten corpses it is marked rough, because a
+	-- 1/4 sample reading "25%" as if it were a 1.12 chance would be a lie.
+	local function measured(rec)
+		local w = (e and e.lootWindows) or 0
+		local n = (rec and rec.count) or 0
+		if w <= 0 then return ns.T("sin dato 1.12") end
+		local pct = math.floor(n / w * 100 + 0.5)
+		local mark = (w < 10) and "~" or ""
+		return ns.T("medido") .. " " .. mark .. pct .. "% (" .. n .. "/" .. w .. ")"
+	end
 	i = i + 1
 	if #pool > 0 then
 		section(i, ("DROPS · %d/%d %s"):format(inPool, #pool, ns.T("descubiertos")), C.green)
@@ -645,7 +878,7 @@ local function renderCard(id)
 		for k = 1, #extra do
 			local rr = rowColored(i + k, itemIcon(extra[k].id),
 				(extra[k].rec.name or itemName(extra[k].id)):sub(1, 40), S.qualityColor(extra[k].id),
-				ns.T(extra[k].quest and "condicional de quest" or "sin dato 1.12"), nil)
+				extra[k].quest and ns.T("condicional de quest") or measured(extra[k].rec), nil)
 			attachItem(rr, extra[k].id)
 		end
 		i = i + #extra
@@ -661,7 +894,7 @@ local function renderCard(id)
 		for k = 1, #extra do
 			local rr = rowColored(i + k, itemIcon(extra[k].id),
 				(extra[k].rec.name or itemName(extra[k].id)):sub(1, 40), S.qualityColor(extra[k].id),
-				ns.T("sin dato 1.12"), nil)
+				measured(extra[k].rec), nil)
 			attachItem(rr, extra[k].id)
 		end
 		i = i + #extra
@@ -766,31 +999,125 @@ local function progressStats()
 			noRef = noRef + 1
 		end
 	end
+	-- every distinct item you have ever seen drop, once each: the numerator of the item counter
+	local itemsSeen = {}
+	local kills, corpses, copperTotal = 0, 0, 0
+	local mostKilled, mostKilledN, richest, richestN
+	local lastAt, lastName, lastLevel
+	for id, e in pairs(seen) do
+		for key in pairs((e and e.drops) or {}) do itemsSeen[tonumber(key) or key] = true end
+		kills = kills + (e.kills or 0)
+		corpses = corpses + (e.lootWindows or 0)
+		copperTotal = copperTotal + (e.moneyCopper or 0)
+		if (e.kills or 0) > (mostKilledN or 0) then
+			mostKilled, mostKilledN = (e.name or ("npc " .. tostring(id))), e.kills
+		end
+		if (e.moneyCopper or 0) > (richestN or 0) then
+			richest, richestN = (e.name or ("npc " .. tostring(id))), e.moneyCopper
+		end
+		if (e.lastSeen or 0) > (lastAt or 0) then
+			lastAt, lastName, lastLevel = e.lastSeen, (e.name or ("npc " .. tostring(id))), e.level
+		end
+	end
+	local itemCount = 0
+	for _ in pairs(itemsSeen) do itemCount = itemCount + 1 end
 	return {
 		found = found, total = countSeed(), poolRows = poolRows, hitRows = hitRows,
 		complete = complete, withRef = withRef, noRef = noRef, outside = outside,
+		items = itemCount, itemTotal = ns.itemTotal or 0,
+		kills = kills, corpses = corpses, copper = copperTotal,
+		mostKilled = mostKilled, mostKilledN = mostKilledN,
+		richest = richest, richestN = richestN,
+		lastName = lastName, lastLevel = lastLevel,
 	}
+end
+
+-- Per-area numbers, with exactly the rules the index uses: a dungeon is its own area, critters and
+-- friendly NPCs are out, and the denominator is the area's roster minus what you proved is not an
+-- enemy for your faction.
+function UI.AreaStats()
+	local seen = (ns.DB() and ns.DB().seen) or {}
+	local groups, notEnemyIn = {}, {}
+	for id, e in pairs(seen) do
+		local critter = type(e.creatureType) == "string" and string.lower(e.creatureType) == "critter"
+		local tableArea = ns.areaOf and ns.areaOf[tonumber(id)]
+		local key
+		if tableArea and ns.areaDungeon and ns.areaDungeon[tableArea] then
+			key = tableArea
+		else
+			key = e.zone or tableArea
+		end
+		if key then
+			if e.hostile == false or critter then
+				notEnemyIn[key] = (notEnemyIn[key] or 0) + 1
+			else
+				local g = groups[key]
+				if not g then
+					g = { area = key, n = 0, done = 0 }
+					groups[key] = g
+				end
+				g.n = g.n + 1
+				if entryComplete(id, e) then g.done = g.done + 1 end
+			end
+		end
+	end
+	local list = {}
+	for area, g in pairs(groups) do
+		g.total = (ns.areaTotal and ns.areaTotal[area]) or #list + g.n
+		g.total = g.total - (notEnemyIn[area] or 0)
+		if g.total < g.n then g.total = g.n end
+		g.dungeon = (ns.areaDungeon and ns.areaDungeon[area]) and true or false
+		g.frac = (g.total > 0) and (g.n / g.total) or 0
+		list[#list + 1] = g
+	end
+	table.sort(list, function(a, b)
+		if a.dungeon ~= b.dungeon then return a.dungeon end
+		if math.abs(a.frac - b.frac) > 0.0001 then return a.frac > b.frac end
+		return a.area < b.area
+	end)
+	return list
 end
 
 function UI.RefreshProgress()
 	if not frame then return end
 	local s = progressStats()
 	local function pct(a, b) return (b > 0) and (a / b * 100) or 0 end
-	if frame.barBestiary then
-		frame.barBestiary:SetMinMaxValues(0, math.max(1, s.total))
-		frame.barBestiary:SetValue(s.found)
-		frame.barBestiary.text:SetText(("%d / %d · %.1f%%"):format(s.found, s.total, pct(s.found, s.total)))
+	local function fill(st, have, total, fmt)
+		if not st then return end
+		st.num:SetText(thousands(have))
+		st.bar:SetMinMaxValues(0, math.max(1, total))
+		st.bar:SetValue(have)
+		st.bar.pct:SetText(fmt)
 	end
-	if frame.barDrops then
-		frame.barDrops:SetMinMaxValues(0, math.max(1, s.poolRows))
-		frame.barDrops:SetValue(s.hitRows)
-		frame.barDrops.text:SetText(("%d / %d · %.1f%%"):format(s.hitRows, s.poolRows, pct(s.hitRows, s.poolRows)))
+	local areas = UI.AreaStats()
+	fill(frame.statBestiary, s.found, s.total, ("%.1f%%"):format(pct(s.found, s.total)))
+	if frame.statBestiary then
+		frame.statBestiary.unit:SetText(("%s %s %s · %d %s · %d %s"):format(
+			ns.T("de"), thousands(s.total), ns.T("criaturas"), #areas, ns.T("zonas"), s.complete, ns.T("completas")))
+	end
+	fill(frame.statDrops, s.hitRows, s.poolRows, ("%.1f%%"):format(pct(s.hitRows, s.poolRows)))
+	if frame.statDrops then
+		frame.statDrops.unit:SetText(("%s %s %s · %d %s"):format(
+			ns.T("de"), thousands(s.poolRows), ns.T("slots de botin"), s.withRef, ns.T("con referencia")))
+	end
+	fill(frame.statItems, s.items, s.itemTotal, ("%.2f%%"):format(pct(s.items, s.itemTotal)))
+	if frame.statItems then
+		frame.statItems.unit:SetText(("%s %s %s · %d %s"):format(
+			ns.T("de"), thousands(s.itemTotal), ns.T("items"), s.outside, ns.T("medidos")))
 	end
 	if frame.progNotes then
+		local topKill, topGold = "-", "-"
+		if (s.mostKilledN or 0) > 0 then
+			topKill = ("%s · %d"):format(tostring(s.mostKilled), s.mostKilledN)
+		end
+		if (s.richestN or 0) > 0 then
+			topGold = ("%s · %s"):format(tostring(s.richest), copper(s.richestN))
+		end
 		local lines = {
-			{ "entradas completas", ("%d / %d"):format(s.complete, s.withRef) },
-			{ "enemigos sin referencia", tostring(s.noRef) },
-			{ "drops fuera de la referencia", tostring(s.outside) },
+			{ "kills · cadaveres looteados", ("%d · %d"):format(s.kills, s.corpses) },
+			{ "oro total", copper(s.copper) },
+			{ "el mas matado", topKill },
+			{ "el mas rico", topGold },
 		}
 		for k = 1, #lines do
 			if frame.progNotes[k] then
@@ -1060,13 +1387,27 @@ function UI.Create()
 	prog:SetSize(PANE_W, PANE_H)
 	prog:Hide()
 	frame.progressPane = prog
-	local function xpBar(y, label)
-		local t = prog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-		t:SetPoint("TOPLEFT", 4, y)
-		t:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
-		t:SetText(ns.T(label))
+	-- Each block: the count as the hero (big, gold), a grey line under it that says what it is being
+	-- counted against, and the bar with the percentage inside. The number carries the screen; the
+	-- bar only shows the shape of the progress.
+	local function statBlock(y, label)
+		local head = prog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		head:SetPoint("TOPLEFT", 4, y)
+		head:SetTextColor(C.grey[1], C.grey[2], C.grey[3])
+		head:SetText(ns.T(label))
+		local num = prog:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+		num:SetPoint("TOPLEFT", 4, y - 13)
+		num:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
+		num:SetText("0")
+		pcall(function()
+			local font, _, flags = GameFontNormal:GetFont()
+			if font then num:SetFont(font, 26, flags or "") end
+		end)
+		local unit = prog:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+		unit:SetPoint("TOPLEFT", 6, y - 44)
+		unit:SetTextColor(C.grey[1], C.grey[2], C.grey[3])
 		local bar = CreateFrame("StatusBar", nil, prog)
-		bar:SetPoint("TOPLEFT", 4, y - 18)
+		bar:SetPoint("TOPLEFT", 4, y - 62)
 		bar:SetSize(PANE_W - 8, 16)
 		bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
 		bar:SetMinMaxValues(0, 1)
@@ -1075,29 +1416,29 @@ function UI.Create()
 		bg:SetAllPoints(bar)
 		bg:SetTexture(0, 0, 0, 0.85)
 		S.Border(bar, C.border)
-		local txt = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		txt:SetPoint("CENTER", 0, 0)
-		bar.text = txt
-		return bar
+		local pct = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		pct:SetPoint("CENTER", 0, 0)
+		bar.pct = pct
+		return { head = head, num = num, unit = unit, bar = bar }
 	end
-	frame.barBestiary = xpBar(-6, "bestiario")
-	frame.barDrops = xpBar(-50, "drops de tus enemigos")
-	-- the three numbers that keep the percentages honest, in the grey the card already uses
+	frame.statBestiary = statBlock(-2, "enemigos conocidos")
+	frame.statDrops = statBlock(-88, "drops")
+	frame.statItems = statBlock(-174, "items")
+	-- what the whole account has accumulated while filling those bars: the fun part
 	local sep = S.tex(prog, C.border[1], C.border[2], C.border[3], 0.8, "ARTWORK")
 	sep:SetHeight(1)
-	sep:SetPoint("TOPLEFT", 4, -96)
-	sep:SetPoint("TOPRIGHT", -4, -96)
+	sep:SetPoint("TOPLEFT", 4, -252)
+	sep:SetPoint("TOPRIGHT", -4, -252)
 	frame.progNotes = {}
-	for k = 1, 3 do
+	for k = 1, 4 do
 		local l = prog:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		l:SetPoint("TOPLEFT", 6, -(104 + (k - 1) * 18))
+		l:SetPoint("TOPLEFT", 6, -(262 + (k - 1) * 18))
 		l:SetTextColor(C.grey[1], C.grey[2], C.grey[3])
 		local v = prog:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		v:SetPoint("TOPRIGHT", -8, -(104 + (k - 1) * 18))
+		v:SetPoint("TOPRIGHT", -8, -(262 + (k - 1) * 18))
 		v:SetTextColor(C.white[1], C.white[2], C.white[3])
 		frame.progNotes[k] = { label = l, value = v }
 	end
-
 	frame.footer = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	frame.footer:SetPoint("BOTTOMLEFT", 14, 8)
 	frame.footer:SetText("")

@@ -8,7 +8,7 @@
 
 local addonName, ns = ...
 
-ns.VERSION = "0.11.4"
+ns.VERSION = "0.15.3"
 ns.DB_VERSION = 1
 ns.BOSS_KILL_WINDOW = 5
 
@@ -125,8 +125,79 @@ function ns.PatchNames()
 				filled = filled + 1
 			end
 		end
+		-- area: fold a stored subzone into its zone ("Jaggedswine Farm" -> "The Barrens"), and fill the
+		-- gap from the table when the entry was captured before the client could tell us, so the index
+		-- never has to show "no zone"
+		if type(e) == "table" then
+			local tableArea = ns.areaOf and ns.areaOf[tonumber(id)]
+			if tableArea and ns.areaDungeon and ns.areaDungeon[tableArea] then
+				-- an instance always wins over the zone around it: a capture taken in a dungeon whose
+				-- client area reads like a city ("Undercity" above the Ruins of Lordaeron) still belongs
+				-- to the dungeon, and the index must not merge a dungeon into a capital
+				e.zone = tableArea
+			else
+				if e.zone and not (ns.areaDungeon and ns.areaDungeon[e.zone]) and ns.zoneOfSub and ns.zoneOfSub[e.zone] then
+					e.zone = ns.zoneOfSub[e.zone]
+				end
+				if not e.zone and tableArea then
+					e.zone = tableArea
+				end
+			end
+		end
 	end
 	return filled, total
+end
+
+-- Entries neither the client nor the tables could place borrow their area from their id neighbours,
+-- but only on a clear majority. Forever handed each of its own instances its own id block (its Ruins
+-- of Lordaeron creatures are 2504xx-2507xx and 2560xx), so the ids around an unplaced boss are that
+-- dungeon's other creatures. Two independent neighbours must agree before an entry is moved.
+function ns.BorrowAreas()
+	local seen = DB.seen
+	local known = {}
+	for id, e in pairs(seen) do
+		local n = tonumber(id)
+		if n and type(e) == "table" and e.zone then known[#known + 1] = { n = n, area = e.zone } end
+	end
+	local fixed = 0
+	for id, e in pairs(seen) do
+		local n = tonumber(id)
+		if n and type(e) == "table" and not e.zone then
+			local votes, best, total = {}, nil, 0
+			for _, other in ipairs(known) do
+				if math.abs(other.n - n) <= 1000 then
+					votes[other.area] = (votes[other.area] or 0) + 1
+					total = total + 1
+				end
+			end
+			for area, count in pairs(votes) do
+				if not best or count > votes[best] then best = area end
+			end
+			if best and total >= 2 and votes[best] / total >= 0.6 then
+				e.zone = best
+				fixed = fixed + 1
+			end
+		end
+	end
+	return fixed
+end
+
+-- Manual escape hatch: place every entry that has no area, either under a given name or under the
+-- zone the player is standing in. Returns how many it moved.
+function ns.AssignZone(name)
+	if not name or name == "" then
+		local okZone, zone = pcall(GetRealZoneText)
+		if okZone and type(zone) == "string" then name = zone end
+	end
+	if not name or name == "" then return 0 end
+	local moved = 0
+	for _, e in pairs(DB.seen) do
+		if type(e) == "table" and not e.zone then
+			e.zone = name
+			moved = moved + 1
+		end
+	end
+	return moved, name
 end
 
 function ns.Entry(id)
@@ -181,7 +252,24 @@ function ns.Touch(id, opts)
 		if opts.hostile ~= nil then e.hostile = opts.hostile end
 		if opts.reaction ~= nil then e.reaction = opts.reaction end
 	end
-	if not e.zone and type(GetRealZoneText) == "function" then e.zone = tostringSafe(GetRealZoneText()) end
+	if not e.zone then
+		-- the zone, not the subzone: the index groups "The Barrens" whole, so a creature found at
+		-- Jaggedswine Farm files under The Barrens. Instances report their own name, which is what
+		-- keeps each dungeon a separate group.
+		local okZone, zone = pcall(GetRealZoneText)
+		if not (okZone and type(zone) == "string" and zone ~= "") then
+			local okFallback, alt = pcall(GetZoneText)
+			zone = (okFallback and type(alt) == "string") and alt or nil
+		end
+		if zone and zone ~= "" then
+			-- fold a subzone the client may still hand back under its zone, but never fold a dungeon
+			-- into the zone it sits in (Ruins of Lordaeron is not Undercity)
+			if not (ns.areaDungeon and ns.areaDungeon[zone]) and ns.zoneOfSub and ns.zoneOfSub[zone] then
+				zone = ns.zoneOfSub[zone]
+			end
+			e.zone = tostringSafe(zone)
+		end
+	end
 	-- the bestiary announces itself: a creature the dex has never recorded before.
 	-- A friendly npc is recorded (it has its own tab) but never announced: this is a bestiary.
 	if isNew and ns.Discovery and e.hostile ~= false then
@@ -251,7 +339,9 @@ function ns.DB() return DB end
 -- One chat line per capture decision, on by default: naming a group corpse depends on a chain of
 -- client calls that fail silently, and watching the chat is faster than any diagnostic window.
 -- `/gdx trace off` silences it.
-local traceOn = true
+-- Off by default. A line per corpse is useful while chasing a naming bug and unbearable while
+-- actually playing a dungeon: `/gdx trace` turns it back on.
+local traceOn = false
 function ns.Trace(msg)
 	if not traceOn then return end
 	print("|cff3fd15aGarchaDex|r " .. tostringSafe(msg))
@@ -319,11 +409,17 @@ function H.PLAYER_LOGIN()
 	-- names first: the table fills every entry the client never named, in one pass, before anything
 	-- reads them (index, card, toasts)
 	local filled, total = ns.PatchNames()
+	local borrowed = ns.BorrowAreas()
 	local names = 0
 	if type(ns.names) == "table" then for _ in pairs(ns.names) do names = names + 1 end end
-	print(("|cff33ff99GarchaDex|r v%s %s. seed[%s] nombres=%d %s%d. |cffffff00/gdx|r %s")
-		:format(ns.VERSION, ns.T("cargado"), table.concat(counts, " "), names, ns.T("capturados="), known, ns.T("para ayuda.")))
-	print(("|cff33ff99GarchaDex|r %s %d/%d"):format(ns.T("nombres de la tabla aplicados:"), filled, total))
+	-- one line, not three: the chat is for the game, and a dungeon run is loud enough already. The
+	-- detail only shows up when it actually did something (names filled, areas borrowed)
+	local tail = {}
+	if filled > 0 then tail[#tail + 1] = ("nombres %d/%d"):format(filled, total) end
+	if borrowed and borrowed > 0 then tail[#tail + 1] = ("zonas %d"):format(borrowed) end
+	print(("|cff33ff99GarchaDex|r v%s %s. seed[%s] nombres=%d %s%d%s. |cffffff00/gdx|r %s")
+		:format(ns.VERSION, ns.T("cargado"), table.concat(counts, " "), names, ns.T("capturados="), known,
+			(#tail > 0 and (" · " .. table.concat(tail, " · ")) or ""), ns.T("para ayuda.")))
 	if type(ns.lootn) ~= "table" or type(ns.spell) ~= "table" then
 		print("|cffff4040GarchaDex|r " .. ns.T("el seed NO se cargo: revisá que GarchaDex/data/gdx_seed.lua exista (el .toc lo lista como data\\gdx_seed.lua) y mirá si hubo un error de Lua al iniciar."))
 	end

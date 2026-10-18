@@ -7,6 +7,9 @@
 -- regenerate: python3 tools/build_seed.py --db <ClassicDB.sql> --out data/gdx_seed.lua
 local _, ns = ...
 ns.SEED = { version = 1, source = "cmangos classic-db z2815", label = "vanilla 1.12 reference" }
+-- how many distinct items can drop from the mobs this seed tracks: the denominator of the
+-- item counter in the progress tab (it is a big number on purpose)
+ns.itemTotal = 7450
 
 -- npc[id] = name|minLevel|maxLevel|rank|creatureTypeType|modelId|mapId (important mobs)
 ns.npc = {

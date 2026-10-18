@@ -386,7 +386,8 @@ end
 SLASH_GARCHADEX1 = "/gdx"
 SLASH_GARCHADEX2 = "/garchadex"
 SlashCmdList["GARCHADEX"] = function(msg)
-	msg = string.lower(msg or "")
+	local raw = msg or ""
+	msg = string.lower(raw)
 	if msg == "stats" then
 		ns.PrintStats()
 	elseif msg == "progreso" or msg == "progress" then
@@ -396,8 +397,25 @@ SlashCmdList["GARCHADEX"] = function(msg)
 		end
 	elseif msg == "enrich" then
 		ns.PrintEnrich()
+	elseif msg:match("^zone") then
+		local name = raw:match("^%s*[Zz][Oo][Nn][Ee]%s+(.+)$")
+		local moved, area = ns.AssignZone(name)
+		if moved > 0 then
+			print(("|cff33ff99GarchaDex|r %s %d → %s"):format(ns.T("zonas asignadas:"), moved, tostring(area)))
+			if ns.UI and ns.UI.RebuildIndex then ns.UI.RebuildIndex() end
+		else
+			print("|cff33ff99GarchaDex|r " .. ns.T("no habia entradas sin zona"))
+		end
 	elseif msg == "trace" then
 		ns.SetTrace(not ns.TraceOn())
+	elseif msg == "lvl" then
+		ns.LevelProbe()
+	elseif msg == "toast" or msg == "toasts" or msg == "notis" then
+		ns.ToastEdit()
+	elseif msg == "toast off" or msg == "toasts off" then
+		ns.ToastEdit(false)
+	elseif msg == "toast reset" or msg == "toasts reset" then
+		ns.ToastReset()
 	elseif msg == "test" then
 		renderSecretTest()
 	elseif msg:match("^%d+$") then
@@ -467,6 +485,7 @@ SlashCmdList["GARCHADEX"] = function(msg)
 		print("  |cffffff00/gdx progreso|r |cff808080" .. ns.T("cuanto del bestiario llevas") .. "|r")
 		print("  |cffffff00/gdx enrich|r |cff808080" .. ns.T("entradas sin nombre y por que") .. "|r")
 		print("  |cffffff00/gdx trace|r |cff808080" .. ns.T("avisos de captura en el chat, on/off") .. "|r")
+		print("  |cffffff00/gdx zone [nombre]|r |cff808080" .. ns.T("ubica las entradas sin zona") .. "|r")
 		print("  |cffffff00/gdx seed|r |cff808080" .. ns.T("estado del seed y chequeo crudo") .. "|r")
 		print("  |cffffff00/gdx loot|r |cff808080" .. ns.T("ultimos looteos vistos") .. "|r")
 		print("  |cffffff00/gdx art|r |cff808080" .. ns.T("auditoria de arte del cliente") .. "|r")

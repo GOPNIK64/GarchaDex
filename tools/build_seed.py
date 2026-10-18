@@ -97,6 +97,18 @@ def clean(s: str) -> str:
     return s[:MAX_NPC_NAME]
 
 
+def item_total(loots, wgroups) -> int:
+    """How many distinct items the seed's pools mention. Some of them are quest rows or world-drop
+    group members, so this is the size of the whole catalogue, not of one mob's pool."""
+    items = set()
+    for value in list(loots.values()) + list(wgroups.values()):
+        for chunk in str(value).split(","):
+            head = chunk.split(":")[0].strip()
+            if head.isdigit():
+                items.add(int(head))
+    return len(items)
+
+
 def lua_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -244,6 +256,9 @@ def build(db_path: str, out_path: str, include_elites: bool = True, all_loot: bo
         "-- regenerate: python3 tools/build_seed.py --db <ClassicDB.sql> --out data/gdx_seed.lua",
         "local _, ns = ...",
         "ns.SEED = { version = 1, source = \"cmangos classic-db z2815\", label = \"vanilla 1.12 reference\" }",
+        "-- how many distinct items can drop from the mobs this seed tracks: the denominator of the",
+        "-- item counter in the progress tab (it is a big number on purpose)",
+        "ns.itemTotal = %d" % item_total(loots, wgroups),
     ])
     body = "\n\n".join([
         table("npc", npc, "npc[id] = name|minLevel|maxLevel|rank|creatureTypeType|modelId|mapId (important mobs)"),
