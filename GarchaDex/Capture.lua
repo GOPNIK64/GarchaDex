@@ -175,12 +175,21 @@ function ns.PollTarget()
 			watching = { id = id, name = name, level = level, ctype = ctype, classification = class }
 			ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class, hostile = canAttack, reaction = reaction })
 		elseif watching.id ~= id then
-			credit("switched target")
-			watching = { id = id }
+			-- Switching targets is NOT a kill: the poll is holding a live, attackable target, so
+			-- whatever we were watching is still standing. The watch is dropped and rebuilt for the
+			-- new creature; the kill comes later, when this one is seen dead.
+			ns.Trace("target switched " .. tostring(watching.id) .. " -> " .. tostring(id) .. " (no kill)")
+			watching = { id = id, name = name, level = level, ctype = ctype, classification = class }
 			ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class, hostile = canAttack, reaction = reaction })
 		end
 	elseif watching then
-		credit(dead and "died" or "gone")
+		if dead then
+			credit("died")
+		else
+			-- no target and no corpse: clearing the target or the corpse fading away is not a kill
+			ns.Trace("target lost " .. tostring(watching.id) .. " (no kill)")
+			watching = nil
+		end
 	end
 end
 
@@ -390,6 +399,21 @@ local function onLootClosed()
 		end
 		if firstWindow then
 			e.lootWindows = (e.lootWindows or 0) + 1
+			-- A corpse can only be opened if the creature died, so this is proof of a kill: if the
+			-- target poll never saw it die (you switched target on the last hit, or the corpse was
+			-- gone before the next tick), credit it here so the counter is not short by one. If the
+			-- poll already credited this creature a moment ago, it is the same kill: skip.
+			local fresh = lastKilled and lastKilled.id == lootWindow.id
+				and (GetTime() - (lastKilled.at or 0)) <= 8
+			if not fresh then
+				e.kills = (e.kills or 0) + 1
+				e.lastKill = time and time() or nil
+				lastKilled = {
+					id = lootWindow.id, at = (GetTime and GetTime()) or 0,
+					name = e.name, level = e.level,
+				}
+				ns.Trace("kill credited from corpse " .. tostring(lootWindow.id))
+			end
 			-- no toast for "first loot window": the only loot news worth interrupting for is an item
 			-- it had never dropped for this creature (new_drop). One per corpse, not two.
 		end

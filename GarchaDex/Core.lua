@@ -8,7 +8,7 @@
 
 local addonName, ns = ...
 
-ns.VERSION = "0.15.3"
+ns.VERSION = "0.15.4"
 ns.DB_VERSION = 1
 ns.BOSS_KILL_WINDOW = 5
 
