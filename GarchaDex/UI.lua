@@ -259,6 +259,31 @@ local function fuzzyScore(name, query)
 	return score
 end
 
+-- Which area an entry belongs to, exactly as the index groups it: the dungeon when the tables know
+-- the creature lives in one, otherwise the zone where it was captured.
+local function areaKeyOf(id, e)
+	local tableArea = ns.areaOf and ns.areaOf[tonumber(id)]
+	if tableArea and ns.areaDungeon and ns.areaDungeon[tableArea] then return tableArea end
+	return (e and e.zone) or tableArea
+end
+UI.AreaKeyOf = areaKeyOf
+
+-- Collapse or expand every area at once. The state is written into the same per-area table the
+-- individual buttons use, so one click on a group still overrides this.
+function UI.SetAllCollapsed(state)
+	local db = ns.DB()
+	db.meta = db.meta or {}
+	db.meta.collapsed = db.meta.collapsed or {}
+	for id, e in pairs(db.seen) do
+		if type(e) == "table" then
+			local key = areaKeyOf(id, e)
+			if key then db.meta.collapsed[key] = state and true or false end
+		end
+	end
+	listOffset = 0
+	rebuildList()
+end
+
 function rebuildList()
 	local seen = ns.DB().seen
 	listOffset = listOffset or 0
@@ -286,7 +311,8 @@ function rebuildList()
 			-- Entry() fills the name from the offline table when the client refused to give one, so an
 			-- old entry stops reading "npc 250484" the moment the table knows it
 			e = ns.Entry(id) or e
-			local name = e.name or (ns.npc and ns.npc[id] and string.match(ns.npc[id], "^[^|]+")) or ("npc " .. id)
+			local seedRow = ns.npc and ns.npc[tonumber(id)]
+			local name = e.name or (seedRow and string.match(seedRow, "^[^|]+")) or ("npc " .. id)
 			local score = 100
 			if filter ~= "" then
 				if string.find(tostring(id), filter, 1, true) then
@@ -510,6 +536,8 @@ local function prep(i, iconPath, colour, pct, barColour)
 		r.icon:Show()
 		local ok = pcall(function() r.icon:SetTexture(iconPath) end)
 		if not ok then r.icon:Hide() end
+		-- every row starts untinted; the undiscovered ones tint their question mark by rarity
+		pcall(function() r.icon:SetVertexColor(1, 1, 1) end)
 		r.text:SetPoint("LEFT", 20, 0)
 	else
 		r.icon:Hide()
@@ -632,6 +660,11 @@ local function renderCard(id)
 	if not sameCard then modelIdx = 1 end
 	local e = ns.Entry(id)   -- Entry also fills the name from the offline table for creatures the client cannot name
 	local meta = seedMeta(id)
+	if frame.forget then
+		frame.forgetArm = nil
+		frame.forget:SetLabel(ns.T("olvidar entrada"))
+		frame.forget:SetShown(uiTab == "card")
+	end
 
 	-- header: name, identity and stats
 	local live = ns.UnitIdentity and ns.UnitIdentity("target")
@@ -863,8 +896,11 @@ local function renderCard(id)
 					math.abs(slot.chance))
 				attachItem(rr, slot.id)
 			else
-				-- not yet dropped: a slot with a question mark, but the chance is already known
-				rr = rowColored(i + k, QUESTION_ICON, "", C.dim, refTxt, math.abs(slot.chance))
+				-- not yet dropped: the slot stays a "?", but it is painted in the item's rarity colour,
+				-- so a purple sitting in the pool is visible before you ever see the item
+				local q = S.qualityColor(slot.id)
+				rr = rowColored(i + k, QUESTION_ICON, "", nil, refTxt, math.abs(slot.chance))
+				if rr and rr.icon then pcall(function() rr.icon:SetVertexColor(q[1], q[2], q[3]) end) end
 			end
 		end
 		i = i + #pool
@@ -1133,6 +1169,11 @@ function UI.SetTab(name)
 	if not frame then return uiTab end
 	local prog = (uiTab == "progress")
 	if frame.head then frame.head:SetShown(not prog) end
+	if frame.forget then
+		frame.forgetArm = nil
+		frame.forget:SetLabel(ns.T("olvidar entrada"))
+		frame.forget:SetShown((not prog) and currentID ~= nil)
+	end
 	if body then body:SetShown(not prog) end
 	if frame.progressPane then frame.progressPane:SetShown(prog) end
 	if frame.tabCard then frame.tabCard.underline:SetShown(not prog) end
@@ -1214,8 +1255,24 @@ function UI.Create()
 	fw.hint:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
 	frame.filterFrame = fw
 
+	-- group toggles for the whole index: with a dozen areas, collapsing them one by one is busywork
+	local function miniButton(glyph, x, tip, onClick)
+		local b = S.Button(fw, glyph, 18, 18, tip, onClick)
+		local fs = b.GetFontString and b:GetFontString()
+		if fs then
+			fs:ClearAllPoints()
+			fs:SetPoint("CENTER", b, "CENTER", 0, 0)
+			fs:SetJustifyH("CENTER")
+			fs:SetJustifyV("MIDDLE")
+		end
+		b:SetPoint("TOPRIGHT", fw, "TOPRIGHT", x, -2)
+		return b
+	end
+	frame.collapseAll = miniButton("-", -6, "colapsar todo", function() UI.SetAllCollapsed(true) end)
+	frame.expandAll = miniButton("+", -26, "expandir todo", function() UI.SetAllCollapsed(false) end)
+
 	listFilter = CreateFrame("EditBox", nil, fw)
-	listFilter:SetSize(LIST_W - 46, 18)
+	listFilter:SetSize(LIST_W - 46 - 44, 18)
 	listFilter:SetPoint("LEFT", 22, 0)
 	listFilter:SetAutoFocus(false)
 	listFilter:SetFontObject("ChatFontNormal")
@@ -1439,6 +1496,28 @@ function UI.Create()
 		v:SetTextColor(C.white[1], C.white[2], C.white[3])
 		frame.progNotes[k] = { label = l, value = v }
 	end
+	frame.forget = S.Button(frame, ns.T("olvidar entrada"), 92, 16, "saca esta entrada de la dex", function(self)
+		if not currentID then return end
+		-- two clicks inside four seconds: this deletes data, an accidental click must not
+		local now = (GetTime and GetTime()) or 0
+		if not frame.forgetArm or (now - frame.forgetArm) > 4 then
+			frame.forgetArm = now
+			self:SetLabel(ns.T("seguro?"))
+			return
+		end
+		frame.forgetArm = nil
+		self:SetLabel(ns.T("olvidar entrada"))
+		local gone = tostring(currentID)
+		local e = ns.DB().seen[gone]
+		ns.DB().seen[gone] = nil
+		currentID, UI.currentID = nil, nil
+		print(("|cff33ff99GarchaDex|r %s %s"):format(ns.T("entrada borrada:"), (e and e.name) or gone))
+		rebuildList()
+		renderCard(nil)
+	end)
+	frame.forget:SetPoint("BOTTOMRIGHT", -10, 6)
+	frame.forget:Hide()
+
 	frame.footer = frame:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 	frame.footer:SetPoint("BOTTOMLEFT", 14, 8)
 	frame.footer:SetText("")

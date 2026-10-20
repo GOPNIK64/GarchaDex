@@ -8,7 +8,7 @@
 
 local addonName, ns = ...
 
-ns.VERSION = "0.15.4"
+ns.VERSION = "0.17.0"
 ns.DB_VERSION = 1
 ns.BOSS_KILL_WINDOW = 5
 
@@ -108,8 +108,8 @@ end
 -- One pass over everything already captured, so the names land at login instead of depending on
 -- looting that creature again (or on the client agreeing to name it). Returns how many it filled.
 function ns.PatchNames()
-	if type(ns.names) ~= "table" then return 0, 0 end
-	local filled, total = 0, 0
+	if type(ns.names) ~= "table" then return 0, 0, 0 end
+	local filled, total, fixedNames = 0, 0, 0
 	for id, e in pairs(DB.seen) do
 		total = total + 1
 		if type(e) == "table" and not e.name then
@@ -123,6 +123,22 @@ function ns.PatchNames()
 				end
 				if not e.creatureType and ctype then e.creatureType = ctype end
 				filled = filled + 1
+			end
+		end
+		-- A name that came from cursor memory is only a guess ("the last thing the cursor touched"),
+		-- and it put a party member's name on nine corpses. Any id the 1.12 base knows gets the base's
+		-- name, whatever it had: the base is the source of truth, the capture is a fallback.
+		if type(e) == "table" then
+			local row = ns.npc and ns.npc[tonumber(id)]
+			local seedName = row and string.match(row, "^[^|]+")
+			local name, level, ctype = ns.NameFromTable(id)
+			if seedName and seedName ~= "" then name = seedName end
+			if name and name ~= e.name then
+				fixedNames = fixedNames + 1
+				e.name = name
+				e.nameFrom = seedName and "1.12" or "tabla"
+				e.enrichedFrom = seedName and nil or "tabla"
+				if not e.creatureType and ctype then e.creatureType = ctype end
 			end
 		end
 		-- area: fold a stored subzone into its zone ("Jaggedswine Farm" -> "The Barrens"), and fill the
@@ -145,7 +161,7 @@ function ns.PatchNames()
 			end
 		end
 	end
-	return filled, total
+	return filled, total, fixedNames
 end
 
 -- Entries neither the client nor the tables could place borrow their area from their id neighbours,
@@ -211,6 +227,16 @@ function ns.Entry(id)
 			drops = {}, spells = {}, spellList = {}, chars = {},
 		}
 		DB.seen[key] = e
+	end
+	-- The 1.12 reference has hierarchy over anything the client showed. A creature whose id is in the
+	-- static base keeps the base's name, always: names captured live are a fallback for creatures the
+	-- base does not know (Forever's own content), never a source that can overwrite a known one.
+	local seedRow = ns.npc and ns.npc[tonumber(key)]
+	local seedName = seedRow and string.match(seedRow, "^[^|]+")
+	if seedName and seedName ~= "" and e.name ~= seedName then
+		e.name = seedName
+		e.nameFrom = "1.12"
+		e.enrichedFrom = nil
 	end
 	-- an entry the client could not name: fill it from the offline table, so the index and the card
 	-- never show "npc <id>" when the name is known somewhere
@@ -336,9 +362,10 @@ end
 function ns.IsInCombat() return inCombat end
 function ns.DB() return DB end
 
--- One chat line per capture decision, on by default: naming a group corpse depends on a chain of
--- client calls that fail silently, and watching the chat is faster than any diagnostic window.
--- `/gdx trace off` silences it.
+-- What changed in this version, in one friendly line. The login prints it under the version, so the
+-- player who just updated knows what they got without reading a changelog. Keep it short and human:
+-- this is the only place the addon talks about itself unprompted.
+ns.NOTES = "fixed buged names"
 -- Off by default. A line per corpse is useful while chasing a naming bug and unbearable while
 -- actually playing a dungeon: `/gdx trace` turns it back on.
 local traceOn = false
@@ -385,11 +412,20 @@ function H.ADDON_LOADED(_, name)
 	end
 	frame:UnregisterEvent("ADDON_LOADED")
 	for _, ev in ipairs({
-		"PLAYER_LOGIN", "PLAYER_TARGET_CHANGED", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "PLAYER_DEAD",
+		"PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_TARGET_CHANGED", "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED", "PLAYER_DEAD",
 	}) do
 		pcall(function() frame:RegisterEvent(ev) end)
 	end
 	if ns.RegisterCapture then ns.RegisterCapture(frame) end
+end
+
+function ns.Repair()
+	-- names first, then areas: this is idempotent, so it can run on every login and every zone load
+	-- without touching anything that is already right
+	local filled, total, repaired = ns.PatchNames()
+	local borrowed = ns.BorrowAreas()
+	if ns.UI and ns.UI.RebuildIndex and ns.UI.frameInstance then pcall(ns.UI.RebuildIndex) end
+	return repaired or 0, borrowed or 0, filled or 0, total or 0
 end
 
 function H.PLAYER_LOGIN()
@@ -408,24 +444,33 @@ function H.PLAYER_LOGIN()
 	for _ in pairs(DB.seen) do known = known + 1 end
 	-- names first: the table fills every entry the client never named, in one pass, before anything
 	-- reads them (index, card, toasts)
-	local filled, total = ns.PatchNames()
-	local borrowed = ns.BorrowAreas()
-	local names = 0
-	if type(ns.names) == "table" then for _ in pairs(ns.names) do names = names + 1 end end
-	-- one line, not three: the chat is for the game, and a dungeon run is loud enough already. The
-	-- detail only shows up when it actually did something (names filled, areas borrowed)
-	local tail = {}
-	if filled > 0 then tail[#tail + 1] = ("nombres %d/%d"):format(filled, total) end
-	if borrowed and borrowed > 0 then tail[#tail + 1] = ("zonas %d"):format(borrowed) end
-	print(("|cff33ff99GarchaDex|r v%s %s. seed[%s] nombres=%d %s%d%s. |cffffff00/gdx|r %s")
-		:format(ns.VERSION, ns.T("cargado"), table.concat(counts, " "), names, ns.T("capturados="), known,
-			(#tail > 0 and (" · " .. table.concat(tail, " · ")) or ""), ns.T("para ayuda.")))
+	local repaired, borrowed, filled, total = ns.Repair()
+	-- Two friendly lines on login, not a data dump: the version and how much the dex holds, then what
+	-- changed since the last time. Seed counts live in /gdx stats, where a player never trips over them.
+	print(("|cff33ff99GarchaDex|r v%s  ·  %d %s  ·  |cffffff00/gdx|r %s"):format(
+		ns.VERSION, known, ns.T("enemigos en la dex"), ns.T("para ayuda.")))
+	print(("|cff90806a%s|r  %s"):format(ns.T("ultimo cambio:"), ns.T(ns.NOTES)))
+	if filled > 0 or (borrowed and borrowed > 0) or (repaired and repaired > 0) then
+		ns.Trace(("names %d/%d · areas %d · reparados %d"):format(filled, total, borrowed or 0, repaired or 0))
+	end
+	if repaired and repaired > 0 then
+		print(("|cff33ff99GarchaDex|r %s %d"):format(ns.T("nombres corregidos con la base 1.12:"), repaired))
+	end
 	if type(ns.lootn) ~= "table" or type(ns.spell) ~= "table" then
 		print("|cffff4040GarchaDex|r " .. ns.T("el seed NO se cargo: revisá que GarchaDex/data/gdx_seed.lua exista (el .toc lo lista como data\\gdx_seed.lua) y mirá si hubo un error de Lua al iniciar."))
 	end
 	ns.StartKillWatch()
 	if ns.UI and ns.UI.BuildBar then pcall(ns.UI.BuildBar) end
 	frame:UnregisterEvent("PLAYER_LOGIN")
+end
+
+function H.PLAYER_ENTERING_WORLD()
+	-- every trip into the world (login, /reload, a dungeon, a zone) re-checks the stored entries, so a
+	-- name the tables now know gets fixed without anyone typing a command
+	local repaired = ns.Repair()
+	if repaired and repaired > 0 then
+		print(("|cff33ff99GarchaDex|r %s %d"):format(ns.T("nombres corregidos con la base 1.12:"), repaired))
+	end
 end
 
 function H.PLAYER_REGEN_DISABLED()

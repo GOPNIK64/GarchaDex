@@ -36,6 +36,13 @@ function ns.UnitIdentity(token)
 	if type(UnitExists) ~= "function" then return nil end
 	local ok, exists = pcall(UnitExists, token)
 	if not ok or exists ~= true then return nil end
+	-- A player is never a dex entry. A mind-controlled party member is attackable and GetCreatureID
+	-- answers happily for a player GUID, so the index filled up with a guildmate during a boss fight.
+	-- Player-controlled covers pets and charmed creatures too: those belong to a player, not the world.
+	local okp, isPlayer = pcall(UnitIsPlayer, token)
+	if okp and isPlayer == true then return nil end
+	local okpc, controlled = pcall(UnitPlayerControlled, token)
+	if okpc and controlled == true then return nil end
 	local okg, guid = pcall(UnitGUID, token)
 	if not okg or guid == nil or isSecret(guid) then return nil end
 	if not (C_CreatureInfo and C_CreatureInfo.GetCreatureID) then return nil end
@@ -555,6 +562,13 @@ end
 -- group kill come from, since by the time the loot panel is up there is no unit under the cursor.
 function H.UPDATE_MOUSEOVER_UNIT()
 	mouseoverEvents = mouseoverEvents + 1
+	-- A player is never a naming source: cursor memory exists for creatures the client refuses to
+	-- name, and a party member under the cursor (or a mind-controlled one) would end up naming the
+	-- next corpse. Same for pets and charmed units.
+	local okp, isPlayer = pcall(UnitIsPlayer, "mouseover")
+	if okp and isPlayer == true then return end
+	local okpc, controlled = pcall(UnitPlayerControlled, "mouseover")
+	if okpc and controlled == true then return end
 	-- No GUID and no creature id: both come back secret for these custom creatures, and comparing a
 	-- secret throws. So this keeps a short history of *what* was under the cursor and matches the loot
 	-- by id when one is readable, or simply by "the last creature the cursor touched" when it is not.
@@ -584,7 +598,11 @@ function enrichFromLive(id, sourceGUID)
 
 	local function apply(name, level, ctype, class, source)
 		if not name then return false end
-		ns.Touch(id, { name = name, level = level, creatureType = ctype, classification = class })
+		-- never overwrite a name we already have: a wrong name from cursor memory used to replace the
+		-- one from the offline table, which is how a party member's name stuck to a corpse
+		local opts = { level = level, creatureType = ctype, classification = class }
+		if not e.name then opts.name = name end
+		ns.Touch(id, opts)
 		e.enrichedFrom = source
 		return true, source
 	end
@@ -611,6 +629,8 @@ function enrichFromLive(id, sourceGUID)
 	local now = (GetTime and GetTime()) or 0
 	-- 2. the cursor memory. No GUID is involved (it is secret and cannot be compared): the newest
 	-- recent entry wins, and any recent entry whose readable id matches the loot id wins over it.
+	-- An entry with a DIFFERENT readable id is never used: that is a different creature, and borrowing
+	-- its name is how a party member's name ended up on a corpse.
 	local pick, how
 	for k = #mouseoverHistory, 1, -1 do
 		local h = mouseoverHistory[k]
@@ -619,7 +639,7 @@ function enrichFromLive(id, sourceGUID)
 				pick, how = h, "memoria del cursor"
 				break
 			end
-			if not pick then pick, how = h, "memoria reciente" end
+			if not pick and not h.id then pick, how = h, "memoria reciente" end
 		end
 	end
 	if pick then

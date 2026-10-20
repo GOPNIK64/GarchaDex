@@ -39,10 +39,15 @@ local QUALITY = {
 }
 
 local function itemQuality(itemID)
-	if not itemID or not (C_Item and C_Item.GetItemQualityByID) then return nil end
-	local ok, q = pcall(C_Item.GetItemQualityByID, itemID)
-	if ok and type(q) == "number" then return q end
-	return nil
+	if not itemID then return nil end
+	if C_Item and C_Item.GetItemQualityByID then
+		local ok, q = pcall(C_Item.GetItemQualityByID, itemID)
+		if ok and type(q) == "number" then return q end
+	end
+	-- the client cannot answer for an item it has never cached, and this client ships no
+	-- GetItemQualityByID at all: the shipped table is what makes an undiscovered slot show its colour
+	local id = tonumber(itemID)
+	return (ns.itemQuality and id and ns.itemQuality[id]) or nil
 end
 S.itemQuality = itemQuality
 

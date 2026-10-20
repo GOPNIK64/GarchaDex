@@ -47,6 +47,16 @@ CURATED = {
     "256097": "Ruins of Lordaeron",   # Bjork
 }
 
+# The site never recorded a name for these (its own page has the bare "NPC <id>" title), so they were
+# the ones left showing a name captured in the game — in practice a party member's. Taken from
+# ZugZugDB, which indexes the vanilla creature tables.
+CURATED_NAMES = {
+    "4829": ("Aku'mai", "28", "Beast"),
+    "4978": ("Aku'mai Servant", "26", "Beast"),
+    "4825": ("Aku'mai Snapjaw", "26", "Beast"),
+    "4830": ("Old Serra'kis", "26", "Beast"),
+}
+
 # The site files cities under /dungeons too. A city is a zone: a creature that lives in Dalaran and
 # that you met outside Orgrimmar belongs where you met it, not in the city's page.
 NOT_INSTANCE = {"City of Dalaran"}
@@ -233,6 +243,8 @@ def main(argv):
     sub2zone = {s: z for s, z in sub2zone.items() if s not in dungeons_set}
     for nid, dungeon in CURATED.items():
         area[nid] = dungeon
+    for nid, (name, level, ctype) in CURATED_NAMES.items():
+        table[nid] = {"name": name, "level": level, "type": ctype}
     total = {}
     for nid, group in area.items():
         # only creatures you can fight: a capital has hundreds of NPCs and no enemies, and counting
