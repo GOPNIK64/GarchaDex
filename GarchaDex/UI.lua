@@ -1234,7 +1234,9 @@ function UI.Create()
 	-- a search box that reads as a search box: its own well, a border, a magnifier and a hint, or it
 	-- looks like another list row and nobody finds it
 	local fw = CreateFrame("Frame", nil, listPane)
-	fw:SetSize(LIST_W - 12, 20)
+	-- the bar stops short of the right edge: the [+] and [-] buttons sit after it, in the same row,
+	-- instead of floating on top of its border
+	fw:SetSize(LIST_W - 12 - 46, 20)
 	fw:SetPoint("TOPLEFT", 6, -4)
 	local fwbg = S.tex(fw, 0.02, 0.015, 0.01, 1, "BACKGROUND")
 	fwbg:SetAllPoints(fw)
@@ -1257,7 +1259,7 @@ function UI.Create()
 
 	-- group toggles for the whole index: with a dozen areas, collapsing them one by one is busywork
 	local function miniButton(glyph, x, tip, onClick)
-		local b = S.Button(fw, glyph, 18, 18, tip, onClick)
+		local b = S.Button(listPane, glyph, 18, 18, tip, onClick)
 		local fs = b.GetFontString and b:GetFontString()
 		if fs then
 			fs:ClearAllPoints()
@@ -1265,14 +1267,16 @@ function UI.Create()
 			fs:SetJustifyH("CENTER")
 			fs:SetJustifyV("MIDDLE")
 		end
-		b:SetPoint("TOPRIGHT", fw, "TOPRIGHT", x, -2)
+		-- the bar's vertical centre is 14 px below the top (it starts at -4 and is 20 tall); an 18 px
+		-- button anchored by its top edge needs -5 for its own centre to land there
+		b:SetPoint("TOPRIGHT", listPane, "TOPRIGHT", x, -5)
 		return b
 	end
-	frame.collapseAll = miniButton("-", -6, "colapsar todo", function() UI.SetAllCollapsed(true) end)
-	frame.expandAll = miniButton("+", -26, "expandir todo", function() UI.SetAllCollapsed(false) end)
+	frame.expandAll = miniButton("+", -6, "expandir todo", function() UI.SetAllCollapsed(false) end)
+	frame.collapseAll = miniButton("-", -28, "colapsar todo", function() UI.SetAllCollapsed(true) end)
 
 	listFilter = CreateFrame("EditBox", nil, fw)
-	listFilter:SetSize(LIST_W - 46 - 44, 18)
+	listFilter:SetSize(LIST_W - 46 - 12, 18)
 	listFilter:SetPoint("LEFT", 22, 0)
 	listFilter:SetAutoFocus(false)
 	listFilter:SetFontObject("ChatFontNormal")
