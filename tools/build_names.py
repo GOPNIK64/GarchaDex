@@ -21,7 +21,10 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.request
+
+SLEEP = 1.1   # seconds between requests to the same host: 70 zone hubs, and they rate limit
 
 BASE = "https://warcraftforever.games"
 SOURCE = BASE + "/npcs"
@@ -32,6 +35,16 @@ LINK = re.compile(r'href="/npcs/(\d+)"')
 NAME = re.compile(r'class="text-foreground">([^<]+)<')
 LEVEL = re.compile(r'class="block truncate text-xs text-muted">([^<]+)<')
 TITLE = re.compile(r"<title>([^<·]+)·")
+
+# ZugZugDB indexes the vanilla creature tables per zone, including every dungeon, and is the only
+# source that covers the whole game: its zone hubs list name, level, type and reaction for each NPC.
+# It is the primary source; the Forever recorder fills what it does not know (custom ids).
+ZB = "https://zugzugdb.com"
+ZB_ROW = re.compile(
+    r'<tr><td><a href=/npc/(\d+)/[a-z0-9\-]+>([^<]+)</a>'
+    r'<td>([^<]*)<td>([^<]*)<td><span class="react react-[a-z]">(Hostile|Neutral|Friendly)</span>'
+)
+ZB_ZONE = re.compile(r"By Zone &gt; ([^<]+)")
 
 # The site has no zone for these and does not list them on the dungeon page, but they are documented
 # bosses of that dungeon by the community guides (wowhead.com/forever/zone=16611, warcrafttavern,
@@ -45,6 +58,8 @@ CURATED = {
     "250660": "Ruins of Lordaeron",   # The Baron
     "256035": "Ruins of Lordaeron",   # Viktor the Vile
     "256097": "Ruins of Lordaeron",   # Bjork
+    "4978": "Blackfathom Deeps",      # Aku'mai Servant (ZugZugDB knows the name, not the zone)
+    "4825": "Blackfathom Deeps",      # Aku'mai Snapjaw
 }
 
 # The site never recorded a name for these (its own page has the bare "NPC <id>" title), so they were
@@ -71,20 +86,58 @@ NPC = re.compile(
 
 
 def fetch(url, force=False):
-    if url.startswith(BASE) and not force:
-        os.makedirs(CACHE, exist_ok=True)
-        local = os.path.join(CACHE, url[len(BASE):].strip("/").replace("/", "_") + ".html")
-        if os.path.exists(local) and os.path.getsize(local) > 2000:
-            return open(local, encoding="utf-8", errors="replace").read()
+    """Cache any URL on disk, with backoff: zugzugdb answers 429 if you knock too fast."""
+    os.makedirs(CACHE, exist_ok=True)
+    local = os.path.join(CACHE, re.sub(r"[^a-z0-9]+", "_", url.lower())[-120:] + ".html")
+    if not force and os.path.exists(local) and os.path.getsize(local) > 2000:
+        return open(local, encoding="utf-8", errors="replace").read()
     req = urllib.request.Request(url, headers={"User-Agent": "GarchaDex/name-table"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        data = r.read().decode("utf-8", "replace")
-    if url.startswith(BASE):
-        os.makedirs(CACHE, exist_ok=True)
-        local = os.path.join(CACHE, url[len(BASE):].strip("/").replace("/", "_") + ".html")
-        open(local, "w", encoding="utf-8").write(data)
-        time.sleep(0.25)
-    return data
+    last = None
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data = r.read().decode("utf-8", "replace")
+            open(local, "w", encoding="utf-8").write(data)
+            time.sleep(SLEEP)
+            return data
+        except urllib.error.HTTPError as err:
+            last = err
+            if err.code == 429:
+                wait = 8 * (attempt + 1)
+                print("      429, esperando %ds (%s)" % (wait, url))
+                time.sleep(wait)
+                continue
+            raise
+        except Exception as err:  # noqa: BLE001 - transient network, worth one more try
+            last = err
+            time.sleep(3)
+    if last is not None:
+        raise last
+    raise RuntimeError("no se pudo bajar " + url)
+
+
+def zugzug():
+    """id -> (name, level, ctype, zone, hostile) from every zone hub of ZugZugDB."""
+    index = fetch(ZB + "/npcs/zone")
+    slugs = sorted(set(re.findall(r'href="?/npcs/([a-z][a-z0-9\-]+)"?', index)))
+    out = {}
+    for slug in slugs:
+        page = fetch(ZB + "/npcs/" + slug)
+        hit = ZB_ZONE.search(page)
+        zone = html.unescape(hit.group(1)).strip() if hit else slug.replace("-", " ").title()
+        count = 0
+        for m in ZB_ROW.finditer(page):
+            nid, name, level, ctype, reaction = m.groups()
+            out[nid] = (
+                html.unescape(name).strip(),
+                level.replace("+", "").strip(),
+                html.unescape(ctype).strip(),
+                zone,
+                reaction == "Hostile",
+            )
+            count += 1
+        print("   zb %-26s %3d npcs" % (zone, count))
+    return out
 
 
 def parse(page):
@@ -219,22 +272,42 @@ def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--html", help="parse a saved copy of /npcs instead of downloading")
     ap.add_argument("--no-dungeons", action="store_true", help="skip the dungeon rosters")
+    ap.add_argument("--no-site", action="store_true", help="skip the Forever recorder entirely")
     ap.add_argument("--out", default=OUT)
     args = ap.parse_args(argv[1:])
 
-    page = open(args.html, encoding="utf-8").read() if args.html else fetch(SOURCE)
-    table = parse(page)
-    if not table:
-        print("no creatures parsed: the page markup changed", file=sys.stderr)
-        return 1
-    print("   /npcs: %d creatures" % len(table))
+    # ZugZugDB first: it indexes the vanilla creature tables per zone, so every dungeon and every
+    # open zone arrives with names, levels, types and reaction — no more holes per id.
+    print("   zugzugdb:")
+    zb = zugzug()
+    table, area, hostile = {}, {}, {}
+    for nid, (name, level, ctype, zone, isHostile) in zb.items():
+        table[nid] = {"name": name, "level": level, "type": ctype}
+        area[nid] = zone
+        hostile[nid] = isHostile
+    print("   zugzugdb: %d npcs" % len(table))
 
-    area, sub2zone, hostile = parse_areas(page)
+    # the Forever recorder fills what the vanilla tables do not have: the custom ids (25xxxx/26xxxx)
+    page = "" if args.no_site else (open(args.html, encoding="utf-8").read() if args.html else fetch(SOURCE))
+    wf = parse(page) if page else {}
+    wf_area, sub2zone, wf_hostile = parse_areas(page) if page else ({}, {}, {})
+    extra = 0
+    for nid, rec in wf.items():
+        if nid not in table:
+            table[nid] = rec
+            extra += 1
+    for nid, zone in wf_area.items():
+        if nid not in area:
+            area[nid] = zone
+    for nid, isHostile in wf_hostile.items():
+        if nid not in hostile:
+            hostile[nid] = isHostile
+    print("   forever recorder: %d extra (%d ids)" % (extra, len(wf)))
+
     dungeons_set = set()
     if not args.no_dungeons:
         print("   dungeons:")
-        found, extra = dungeons(table)
-        table.update(extra)
+        found, _ = dungeons(table)
         dungeons_set = set(found) - NOT_INSTANCE
         for dungeon, ids in found.items():
             for nid in ids:
